@@ -1,0 +1,158 @@
+use clap::Parser;
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+mod check;
+mod classify;
+mod output;
+mod scan;
+mod target;
+
+use classify::{classify_asset, Kind};
+
+/// Extract the embedded web frontend out of a compiled Tauri app binary.
+#[derive(Parser, Debug)]
+#[command(name = "untauri", version, about)]
+struct Cli {
+    /// Path to a .app bundle or a raw executable
+    path: PathBuf,
+    /// Output directory
+    #[arg(short, long, default_value = "unpacked")]
+    out: PathBuf,
+    /// Also write streams that could not be classified as web assets
+    #[arg(long)]
+    raw: bool,
+    /// Print the recovered asset table to stderr
+    #[arg(short, long)]
+    verbose: bool,
+    /// Write only assets.json, do not extract files
+    #[arg(long)]
+    manifest_only: bool,
+    /// Exit non-zero when the recovered bundle references something that was not extracted
+    #[arg(long)]
+    strict: bool,
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let loaded = match target::load(&cli.path) {
+        Ok(l) => l,
+        Err(e) => { eprintln!("error: not a readable binary: {} ({e})", cli.path.display()); return ExitCode::from(1); }
+    };
+
+    let mut assets: Vec<scan::Asset> = Vec::new();
+    let mut undecoded: Vec<String> = Vec::new();
+    for r in &loaded.ranges {
+        let (found, failed) = scan::walk(&loaded.data, r.clone());
+        assets.extend(found);
+        undecoded.extend(failed);
+    }
+
+    let stream_count = assets.len();
+    let mut items: Vec<(scan::Asset, Kind)> = assets.into_iter()
+        .map(|a| { let k = classify_asset(a.name.as_deref(), &a.bytes); (a, k) })
+        .filter(|(_, k)| cli.raw || *k != Kind::Bin)
+        .collect();
+
+    if items.is_empty() {
+        eprintln!("found {stream_count} streams, none looked like web assets — this may not be a Tauri app, or it's a debug build with loose assets.");
+        return ExitCode::from(2);
+    }
+
+    items.extend(hash_aliases(&undecoded, &items));
+
+    if cli.verbose {
+        for (a, k) in &items { eprintln!("  {:>10} {:<5} off={} clen={}", a.bytes.len(), k.ext(), a.offset, a.compressed_len); }
+    }
+
+    let entries = match output::write(&cli.out, &items, cli.manifest_only) {
+        Ok(entries) => entries,
+        Err(e) => { eprintln!("error writing output: {e}"); return ExitCode::from(1); }
+    };
+    eprintln!("recovered {} assets -> {}", entries.len(), cli.out.display());
+
+    let missing = check::missing(&items, &entries);
+    if missing.is_empty() {
+        eprintln!("completeness: every JS/CSS chunk and font the bundle names (mapDeps, ./chunk imports, CSS url()) was extracted.");
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("warning: {} asset(s) named by the recovered bundle were NOT extracted:", missing.len());
+        for m in &missing { eprintln!("  missing: {m}"); }
+        if cli.strict { ExitCode::from(3) } else { ExitCode::SUCCESS }
+    }
+}
+
+// A record whose stream will not decode may be a Vite duplicate: two emitted names for
+// identical content, stored once (`classDiagram-v2-Q7r8S9t0-M3n4O5p6.js` shares the
+// `M3n4O5p6` content hash with `classDiagram-U1v2W3x4-M3n4O5p6.js`). Copy the twin's
+// bytes out under the failing record's name.
+fn hash_aliases(undecoded: &[String], items: &[(scan::Asset, Kind)]) -> Vec<(scan::Asset, Kind)> {
+    let mut out = Vec::new();
+    for name in undecoded {
+        let Some(key) = hash_key(name) else { continue };
+        let Some((src, kind)) = items.iter().find(|(a, _)| a.name.as_deref().and_then(hash_key) == Some(key.clone())) else { continue };
+        eprintln!("note: {name} did not decode; emitting a copy of {} (same content hash)", src.name.as_deref().unwrap_or("?"));
+        out.push((
+            scan::Asset { offset: src.offset, compressed_len: src.compressed_len, bytes: src.bytes.clone(), name: Some(name.clone()) },
+            *kind,
+        ));
+    }
+    out
+}
+
+// `classDiagram-v2-Q7r8S9t0-M3n4O5p6.js` -> ("M3n4O5p6", "js"): Vite's content hash plus
+// the extension, which together identify identical content. The hash must be Vite-shaped:
+// exactly 8 base64-ish chars with BOTH an upper- and a lower-case letter. Without the
+// mixed-case requirement, kebab-case names alias by their last word (`panel-window.js`
+// and `dialog-window.js` both -> "window"), so a record that merely fails to decode would
+// be handed the wrong file's bytes under its real name, and the completeness check, seeing
+// the name written, would falsely report clean.
+fn hash_key(name: &str) -> Option<(String, String)> {
+    let (stem, ext) = name.rsplit_once('.')?;
+    let hash = stem.rsplit('-').next()?;
+    let vite_shaped = hash.len() == 8
+        && hash.chars().any(|c| c.is_ascii_uppercase())
+        && hash.chars().any(|c| c.is_ascii_lowercase());
+    vite_shaped.then(|| (hash.to_string(), ext.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn asset(name: &str) -> (scan::Asset, Kind) {
+        (scan::Asset { offset: 7, compressed_len: 9, bytes: b"export default 1;".to_vec(), name: Some(name.into()) }, Kind::Js)
+    }
+
+    // Mutation check: drop the hash comparison (match any asset) and the negative case
+    // below starts producing an alias; drop the alias entirely and the first fails.
+    #[test]
+    fn aliases_an_undecodable_record_to_its_content_hash_twin() {
+        let items = vec![asset("classDiagram-U1v2W3x4-M3n4O5p6.js")];
+        let out = hash_aliases(&["classDiagram-v2-Q7r8S9t0-M3n4O5p6.js".to_string()], &items);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0.name.as_deref(), Some("classDiagram-v2-Q7r8S9t0-M3n4O5p6.js"));
+        assert_eq!(out[0].0.bytes, items[0].0.bytes);
+    }
+
+    #[test]
+    fn does_not_alias_across_different_content_hashes() {
+        let items = vec![asset("classDiagram-U1v2W3x4-ZZZZZZZZ.js")];
+        assert!(hash_aliases(&["classDiagram-v2-Q7r8S9t0-M3n4O5p6.js".to_string()], &items).is_empty());
+    }
+
+    // Kebab-case names with no content hash must NOT alias by their last word. Mutation
+    // check: drop the len==8 + mixed-case guard (`hash.len() >= 6`) and `window` aliases,
+    // producing a copy of dialog-window's bytes under panel-window's name.
+    #[test]
+    fn kebab_case_names_without_a_hash_do_not_alias() {
+        let items = vec![asset("dialog-window.js")];
+        assert!(
+            hash_aliases(&["panel-window.js".to_string()], &items).is_empty(),
+            "a bare kebab word (`window`) is not a Vite content hash"
+        );
+        // ...but a real Vite pair still aliases (both share the 8-char mixed-case M3n4O5p6)
+        let vite = vec![asset("classDiagram-U1v2W3x4-M3n4O5p6.js")];
+        assert_eq!(hash_aliases(&["classDiagram-v2-Q7r8S9t0-M3n4O5p6.js".to_string()], &vite).len(), 1);
+    }
+}

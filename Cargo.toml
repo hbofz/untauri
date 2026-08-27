@@ -1,0 +1,17 @@
+[package]
+name = "untauri"
+version = "0.2.0"
+edition = "2021"
+description = "Extract the embedded web frontend out of a compiled Tauri app binary"
+license = "MIT"
+repository = "https://github.com/hbofz/untauri"
+readme = "README.md"
+keywords = ["tauri", "reverse-engineering", "brotli", "unpacker", "macos"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+brotli = "6"
+object = "0.36"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
