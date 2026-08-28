@@ -2,3 +2,4 @@
 unpacked/
 *.app
 *.dmg
+.DS_Store

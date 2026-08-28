@@ -47,6 +47,7 @@ Flags:
 | `-v, --verbose` | Print the recovered asset table to stderr |
 | `--raw` | Also dump streams that couldn't be classified as web assets |
 | `--manifest-only` | Write only `assets.json`, don't extract files |
+| `--tree` | Rebuild the bundle's original directory layout instead of grouping by kind |
 | `--strict` | Exit non-zero if the recovered bundle references an asset that wasn't extracted |
 
 ## Output
@@ -65,9 +66,14 @@ out/
   assets.json
 ```
 
+`--tree` writes the same assets under their original key paths instead
+(`index.html`, `assets/main-[hash].js`, `sw.js`), so the output directory can be
+served as-is and the bundle's own relative imports resolve.
+
 After writing, untauri diffs what the recovered bundle *references*
-(`__vite__mapDeps` entries, `./chunk.js` import specifiers, CSS `url(...)`)
-against what it actually wrote, and warns about anything missing. `--strict`
+(`__vite__mapDeps` entries, `./chunk.js` import specifiers, root-absolute
+`"/favicon.svg"` paths in HTML, CSS `url(...)`) against what it actually wrote, and warns
+about anything missing. `--strict`
 turns that warning into a non-zero exit. The check covers the local
 JS/CSS/font/image names the bundle spells out; it does not chase references it
 cannot parse from a static scan (dynamically-built paths, nested-directory

@@ -8,6 +8,9 @@ pub struct Asset {
     // was decoded off (e.g. `main-A1b2C3d4.css`). None for streams found by forward-
     // chaining or the exhaustive scan, which have no key of their own.
     pub name: Option<String>,
+    // The whole key path the name came from (`/assets/main-A1b2C3d4.css`), so `--tree`
+    // can rebuild the original directory layout. None whenever `name` is.
+    pub path: Option<String>,
 }
 
 // 4MB bounded probe window: a stream whose *compressed* length exceeds it cannot be
@@ -126,84 +129,142 @@ fn looks_textual(bytes: &[u8]) -> bool {
     (printable as f32) / (n as f32) >= 0.85
 }
 
-// Every asset is stored as `/assets/<name><brotli stream>`, so the literal `/assets/`
-// is the reliable enumeration of the record set: scanning for it found all 441 records
-// in a real Tauri app where the chain walk found 388. Returns (assets, names whose stream did
-// not decode).
+// Every asset is stored as `<key path><brotli stream>`, so each `/`-led key path in the
+// section enumerates a record. Each is decoded independently, which is the whole point:
+// a record found this way cannot be hidden by a neighbouring stream reporting a bad
+// length. Returns (assets, names whose stream did not decode).
 //
-// Why the chain walk alone under-recovers (measured on a real Tauri app): an anchor at
-// offset 21737038 decodes as a valid brotli stream consuming 395900 bytes and emitting
-// 395895 (a stored/uncompressed metablock run over binary data). `covered_end` then
-// jumps 396KB, and every real record inside that span — `PanelWindow-E5f6G7h8.js` among
-// them — is skipped by the `anchor < covered_end` guard. A second, independent mode:
-// when a stream's first byte is itself a name char, the anchor's key run swallows it and
-// the decode starts one byte late.
+// This used to enumerate the literal `/assets/` only, which left every root-level record
+// (`/index.html`, `/vite.svg`, `/main.js`) with no independent path and reachable solely
+// through the chain/scan walks — where one over-consuming decode loses the lot. Measured
+// on a Vite Tauri build: a single stream at offset 4825011 decoded as 547169 consumed
+// bytes, `walk_scan` stepped over the whole span, and index.html, tauri.svg and vite.svg
+// (all inside it) were silently dropped while the `/assets/` files survived only because
+// this pass found them on their own. Same bytes, extracted as a standalone slice:
+// 8 of 8. Hence: give every key path the independent pass, not just `/assets/`.
 fn walk_literal(data: &[u8], range: &std::ops::Range<usize>) -> (Vec<Asset>, Vec<String>) {
-    let mut assets = Vec::new();
+    let mut assets: Vec<Asset> = Vec::new();
+    let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut failed = Vec::new();
     for cands in literal_records(data, range) {
         let mut done = false;
-        for (name, data_off) in &cands {
-            let end = (data_off + WINDOW).min(range.end);
-            if let Decoded::Asset(bytes, consumed) = decode(data, *data_off, end, MAX_OUT, false) {
-                if consumed > 0 && bytes.len() >= MIN_OUT {
-                    assets.push(Asset { offset: *data_off, compressed_len: consumed, bytes, name: Some(name.clone()) });
-                    done = true;
-                    break;
-                }
+        for (base, path, data_off) in &cands {
+            // Two key runs can name the same stream (`/deep/x.js` is also found from its
+            // inner `/x.js`); the first spelling wins and the record is not re-decoded.
+            if seen.contains(data_off) { done = true; break; }
+            if let Some((bytes, consumed)) = decode_record(data, *data_off, range) {
+                seen.insert(*data_off);
+                assets.push(Asset {
+                    offset: *data_off,
+                    compressed_len: consumed,
+                    bytes,
+                    name: Some(base.clone()),
+                    path: Some(path.clone()),
+                });
+                done = true;
+                break;
             }
         }
         if !done {
-            if let Some((name, _)) = cands.first() { failed.push(name.clone()); }
+            if let Some((base, _, _)) = cands.first() { failed.push(base.clone()); }
         }
     }
     (assets, failed)
+}
+
+// Decode the stream sitting on a key. Two departures from the keyless walks, both earned
+// by the key being strong evidence that a real record starts here:
+//
+// * WINDOW is a slice bound, not a format limit. A stream longer than it makes brotli
+//   report NeedsMoreInput and the record is lost outright (a 6MB asset reproduces this).
+//   Retry unbounded to the end of the range before giving up.
+// * MIN_OUT is a false-positive filter for blind scanning. A keyed record does not need
+//   it, and applying it drops legitimately tiny assets (a 1-byte file reproduces this).
+fn decode_record(data: &[u8], off: usize, range: &std::ops::Range<usize>) -> Option<(Vec<u8>, usize)> {
+    let windowed = (off + WINDOW).min(range.end);
+    let ends = if windowed == range.end { &[windowed][..] } else { &[windowed, range.end][..] };
+    for end in ends {
+        if let Decoded::Asset(bytes, consumed) = decode(data, off, *end, MAX_OUT, false) {
+            if consumed > 0 && !bytes.is_empty() { return Some((bytes, consumed)); }
+        }
+    }
+    None
 }
 
 fn name_char(b: u8) -> bool {
     matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-')
 }
 
-// For each `/assets/` occurrence, the candidate (name, stream offset) pairs, best first.
-// The record has no length field, so the name ends where the brotli stream begins and
-// the stream's first byte may itself be a name char. At each `.` in the candidate, try
-// every following end position and keep the ones whose extension `classify::kind_from_ext`
+// Key paths hold directory separators, and filenames are not always ASCII: a non-ASCII
+// byte ends the run under a plain `name_char`, so the anchor lands mid-name and the
+// stream is never probed (`café-ñ.js` reproduces this). Accepting high bytes can instead
+// over-run into the stream, which is exactly what the per-dot candidate list below
+// already exists to absorb.
+fn key_char(b: u8) -> bool { name_char(b) || b == b'/' || b >= 0x80 }
+
+// Longest key run considered. A path this long is binary data, not a key.
+const MAX_KEY: usize = 260;
+
+// For each key path, the candidate (basename, path, stream offset) triples, best first.
+// The record has no length field, so the name ends where the brotli stream begins and the
+// stream's first byte may itself be a name char. At each `.` in the run, try every
+// following end position and keep the ones whose extension `classify::kind_of_ext`
 // recognises — one source of truth, so any kind the classifier writes is also a kind the
-// scan enumerates (was a hardcoded 12-ext list that missed webp/ico/gif/map/mp3-as-other
-// and left `x.js.map` truncating to `x.js`). Prefer a candidate whose extension is
-// followed by a non-name byte (clean), then the shortest such name; the decode picks the
-// winner. (`x.js.map` beats `x.js` because `.js` ends on a `.`, a name byte, so it is not
-// clean, not because it is longer — see the sort note below.)
-fn literal_records(data: &[u8], range: &std::ops::Range<usize>) -> Vec<Vec<(String, usize)>> {
-    const PREFIX: &[u8] = b"/assets/";
+// scan enumerates. Prefer a candidate whose extension is followed by a non-key byte
+// (clean), then the shortest such name; the decode picks the winner. (`x.js.map` beats
+// `x.js` because `.js` ends on a `.`, a key byte, so it is not clean, not because it is
+// longer.)
+//
+// A run can hold more than one key: adjacent keys pack with no separator between them
+// (`/assets/classDiagram-v2-HSJHXN6E-BNMu6tuA.js/assets/sequenceDiagram-FGHM5R23-DsoRjOOc.js`
+// appears verbatim in a release binary). Split the run wherever a dot's preferred name is
+// followed by `/` — that is a new key path starting, not a directory inside this one — and
+// emit a record per segment. Splitting on every dot instead would break `x.js.map`, whose
+// `.js` is also a preferred-but-unclean name; there the next byte is `.`, not `/`.
+fn literal_records(data: &[u8], range: &std::ops::Range<usize>) -> Vec<Vec<(String, String, usize)>> {
     let seg = &data[range.clone()];
     let mut out = Vec::new();
     let mut i = 0usize;
-    while i + PREFIX.len() < seg.len() {
-        let Some(rel) = seg[i..].windows(PREFIX.len()).position(|w| w == PREFIX) else { break };
-        let s = i + rel + PREFIX.len();
-        let mut e = s;
-        while e < seg.len() && e - s < 120 && name_char(seg[e]) { e += 1; }
-        let mut cands: Vec<(String, usize, bool)> = Vec::new();
-        for k in s..e {
-            if seg[k] != b'.' { continue; }
+    while i < seg.len() {
+        if seg[i] != b'/' { i += 1; continue; }
+        let start = i;
+        let mut e = start + 1;
+        while e < seg.len() && e - start < MAX_KEY && key_char(seg[e]) { e += 1; }
+
+        let mut seg_start = start;
+        let mut group: Vec<(String, String, usize, bool)> = Vec::new();
+        for k in seg_start + 1..e {
+            if k < seg_start || seg[k] != b'.' { continue; }
+            let mut dot: Vec<(String, String, usize, bool)> = Vec::new();
             for end in k + 2..=e {
                 if seg[end - 1] == b'.' { continue; }
-                let name = String::from_utf8_lossy(&seg[s..end]).into_owned();
-                if crate::classify::kind_from_ext(&name).is_none() { continue; }
-                let clean = end >= seg.len() || !name_char(seg[end]);
-                cands.push((name, range.start + end, clean));
+                // Reject on the extension bytes before allocating anything: in binary
+                // data almost every candidate dies here.
+                let Ok(ext) = std::str::from_utf8(&seg[k + 1..end]) else { continue };
+                if crate::classify::kind_of_ext(ext).is_none() { continue; }
+                let path = String::from_utf8_lossy(&seg[seg_start..end]).into_owned();
+                let base = path.rsplit('/').next().unwrap_or(&path).to_string();
+                if base.is_empty() { continue; }
+                let clean = end >= seg.len() || !key_char(seg[end]);
+                dot.push((base, path, range.start + end, clean));
+            }
+            if dot.is_empty() { continue; }
+            dot.sort_by_key(|(b, _, _, clean)| (!*clean, b.len()));
+            // Preferred end of this dot's own name, in `seg` coordinates.
+            let pref_end = dot[0].2 - range.start;
+            group.extend(dot);
+            if pref_end < e && seg[pref_end] == b'/' {
+                group.sort_by_key(|(b, _, _, clean)| (!*clean, b.len()));
+                out.push(std::mem::take(&mut group).into_iter().map(|(b, p, o, _)| (b, p, o)).collect());
+                seg_start = pref_end;
             }
         }
-        // Clean termination first, then shortest. A `.js.map` record's `.js` candidate
-        // ends on a `.` (a name char, so not clean) while `.js.map` ends clean, so the
-        // full name is preferred without special-casing; the shortest *clean* name is the
-        // true filename and avoids a coincidental longer ext reaching into the stream.
-        cands.sort_by_key(|(n, _, clean)| (!*clean, n.len()));
-        if !cands.is_empty() {
-            out.push(cands.into_iter().map(|(n, o, _)| (n, o)).collect());
+        if !group.is_empty() {
+            group.sort_by_key(|(b, _, _, clean)| (!*clean, b.len()));
+            out.push(group.into_iter().map(|(b, p, o, _)| (b, p, o)).collect());
         }
-        i = s;
+        // Skip past the run: its interior `/`s are the same key, not new records.
+        i = e.max(start + 1);
     }
     out
 }
@@ -315,7 +376,15 @@ fn walk_anchored(data: &[u8], range: &std::ops::Range<usize>) -> Vec<Asset> {
                 Decoded::Asset(bytes, consumed) if consumed > 0 && bytes.len() >= MIN_OUT => {
                     covered_end = off + consumed;
                     let name = if first && !key_name.is_empty() { Some(key_name.clone()) } else { None };
-                    assets.push(Asset { offset: off, compressed_len: consumed, bytes, name });
+                    assets.push(Asset { offset: off, compressed_len: consumed, bytes, name, path: None });
+                    off += consumed;
+                    first = false;
+                }
+                // Below MIN_OUT is still a real record boundary with a trustworthy length.
+                // Breaking here ended the chain and lost every asset packed behind it; step
+                // over instead and keep walking. (`walk_literal` records the tiny asset.)
+                Decoded::Asset(_, consumed) if consumed > 0 => {
+                    covered_end = off + consumed;
                     off += consumed;
                     first = false;
                 }
@@ -337,7 +406,7 @@ fn walk_scan(data: &[u8], range: &std::ops::Range<usize>) -> Vec<Asset> {
     while off < range.end {
         match decode(data, off, range.end, MAX_OUT, true) {
             Decoded::Asset(bytes, consumed) if consumed > 0 && bytes.len() >= MIN_OUT => {
-                assets.push(Asset { offset: off, compressed_len: consumed, bytes, name: None });
+                assets.push(Asset { offset: off, compressed_len: consumed, bytes, name: None, path: None });
                 off += consumed;
             }
             _ => off += 1,
@@ -358,6 +427,97 @@ mod tests {
             w.write_all(input).unwrap();
         }
         out
+    }
+
+    fn record(key: &[u8], payload: &[u8]) -> Vec<u8> {
+        let mut data = Vec::from(key);
+        data.extend_from_slice(&br_compress(payload));
+        data
+    }
+
+    // The regression this whole pass exists for: a root-level record has no `/assets/`
+    // prefix, and enumerating only that prefix left it reachable solely through the
+    // chain/scan walks, where one over-consuming neighbour loses it silently.
+    // Mutation check: restore the `/assets/` literal and this fails.
+    #[test]
+    fn enumerates_a_root_level_key_not_just_assets_paths() {
+        let payload = b"<!doctype html><title>x</title>".repeat(3);
+        let data = record(b"/index.html", &payload);
+        let (assets, _) = walk_literal(&data, &(0..data.len()));
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].name.as_deref(), Some("index.html"));
+        assert_eq!(assets[0].path.as_deref(), Some("/index.html"));
+        assert_eq!(assets[0].bytes, payload);
+    }
+
+    // Two keys pack with no separator when the first one's stream is absent. The second
+    // must come out under its own path, not the concatenation of both.
+    // Mutation check: drop the `seg[pref_end] == b'/'` split and the path becomes
+    // `/assets/x.js/assets/y.js`.
+    #[test]
+    fn splits_a_run_holding_two_packed_keys() {
+        let payload = b"export const y = 1;".repeat(3);
+        let data = record(b"/assets/x.js/assets/y.js", &payload);
+        let (assets, failed) = walk_literal(&data, &(0..data.len()));
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].path.as_deref(), Some("/assets/y.js"));
+        assert_eq!(assets[0].name.as_deref(), Some("y.js"));
+        assert!(failed.contains(&"x.js".to_string()), "the key with no stream is reported");
+    }
+
+    // The split must trigger on `/` only: `.js.map`'s inner `.js` is also a preferred
+    // unclean name, but it is one key, not two.
+    #[test]
+    fn does_not_split_a_map_name_at_its_inner_dot() {
+        let payload = b"{\"version\":3,\"sources\":[]}".repeat(3);
+        let data = record(b"/assets/x.js.map", &payload);
+        let (assets, _) = walk_literal(&data, &(0..data.len()));
+        assert_eq!(assets[0].name.as_deref(), Some("x.js.map"));
+    }
+
+    // A non-ASCII byte used to end the key run, so the anchor landed mid-name and the
+    // stream was never probed. Mutation check: drop `b >= 0x80` from `key_char`.
+    #[test]
+    fn recovers_a_record_whose_name_is_not_ascii() {
+        let payload = b"export const MARKER = 1;".repeat(3);
+        let data = record("/assets/café-ñ.js".as_bytes(), &payload);
+        let (assets, _) = walk_literal(&data, &(0..data.len()));
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].name.as_deref(), Some("café-ñ.js"));
+    }
+
+    // MIN_OUT is a false-positive filter for blind scanning; a keyed record does not need
+    // it and applying it drops legitimately tiny assets.
+    // Mutation check: reinstate `bytes.len() >= MIN_OUT` in `decode_record`.
+    #[test]
+    fn recovers_a_keyed_record_smaller_than_the_min_out_floor() {
+        let data = record(b"/data/tiny.json", b"1");
+        let (assets, _) = walk_literal(&data, &(0..data.len()));
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].bytes, b"1");
+    }
+
+    // WINDOW bounds the probe slice, not the format. A stream longer than it makes brotli
+    // report NeedsMoreInput, and only the unbounded retry can finish it.
+    // Mutation check: drop `range.end` from `decode_record`'s end list.
+    #[test]
+    fn recovers_a_keyed_record_longer_than_the_probe_window() {
+        // Incompressible, so the compressed stream really does exceed WINDOW.
+        let mut payload = vec![0u8; WINDOW + (1 << 19)];
+        let mut x: u32 = 0x1234_5678;
+        for b in payload.iter_mut() {
+            x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+            *b = x as u8;
+        }
+        let mut data = Vec::from(&b"/data/big.json"[..]);
+        {
+            let mut w = brotli::CompressorWriter::new(&mut data, 4096, 1, 22);
+            w.write_all(&payload).unwrap();
+        }
+        assert!(data.len() - 14 > WINDOW, "payload must not compress below the window");
+        let (assets, _) = walk_literal(&data, &(0..data.len()));
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].bytes.len(), payload.len());
     }
 
     #[test]

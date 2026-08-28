@@ -28,6 +28,11 @@ struct Cli {
     /// Write only assets.json, do not extract files
     #[arg(long)]
     manifest_only: bool,
+
+    /// Rebuild the bundle's original directory layout instead of grouping by kind,
+    /// so the output directory can be served as-is
+    #[arg(long)]
+    tree: bool,
     /// Exit non-zero when the recovered bundle references something that was not extracted
     #[arg(long)]
     strict: bool,
@@ -65,7 +70,7 @@ fn main() -> ExitCode {
         for (a, k) in &items { eprintln!("  {:>10} {:<5} off={} clen={}", a.bytes.len(), k.ext(), a.offset, a.compressed_len); }
     }
 
-    let entries = match output::write(&cli.out, &items, cli.manifest_only) {
+    let entries = match output::write(&cli.out, &items, cli.manifest_only, cli.tree) {
         Ok(entries) => entries,
         Err(e) => { eprintln!("error writing output: {e}"); return ExitCode::from(1); }
     };
@@ -93,7 +98,18 @@ fn hash_aliases(undecoded: &[String], items: &[(scan::Asset, Kind)]) -> Vec<(sca
         let Some((src, kind)) = items.iter().find(|(a, _)| a.name.as_deref().and_then(hash_key) == Some(key.clone())) else { continue };
         eprintln!("note: {name} did not decode; emitting a copy of {} (same content hash)", src.name.as_deref().unwrap_or("?"));
         out.push((
-            scan::Asset { offset: src.offset, compressed_len: src.compressed_len, bytes: src.bytes.clone(), name: Some(name.clone()) },
+            // Same directory as the twin, under the failing record's own name, so `--tree`
+            // places the copy where the bundle expects to find it.
+            scan::Asset {
+                offset: src.offset,
+                compressed_len: src.compressed_len,
+                bytes: src.bytes.clone(),
+                name: Some(name.clone()),
+                path: src.path.as_deref().map(|p| match p.rsplit_once('/') {
+                    Some((dir, _)) => format!("{dir}/{name}"),
+                    None => name.clone(),
+                }),
+            },
             *kind,
         ));
     }
@@ -121,7 +137,7 @@ mod tests {
     use super::*;
 
     fn asset(name: &str) -> (scan::Asset, Kind) {
-        (scan::Asset { offset: 7, compressed_len: 9, bytes: b"export default 1;".to_vec(), name: Some(name.into()) }, Kind::Js)
+        (scan::Asset { offset: 7, compressed_len: 9, bytes: b"export default 1;".to_vec(), name: Some(name.into()), path: None }, Kind::Js)
     }
 
     // Mutation check: drop the hash comparison (match any asset) and the negative case

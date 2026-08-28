@@ -16,7 +16,14 @@ impl Kind {
 // font whatever its bytes sniff as, and content sniffing cannot tell a font from garbage
 // at all — which is how 39 KaTeX fonts were classified `bin` and dropped.
 pub fn kind_from_ext(name: &str) -> Option<Kind> {
-    let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
+    kind_of_ext(name.rsplit_once('.')?.1)
+}
+
+// The extension alone, so a candidate can be rejected off a byte slice without first
+// allocating a name string for it. `kind_from_ext` is the only other caller, so the
+// extension table stays a single source of truth.
+pub fn kind_of_ext(ext: &str) -> Option<Kind> {
+    let ext = ext.to_ascii_lowercase();
     Some(match ext.as_str() {
         "html" | "htm" => Kind::Html,
         "css" => Kind::Css,

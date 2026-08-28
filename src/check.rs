@@ -15,7 +15,15 @@ pub fn referenced(items: &[(Asset, Kind)]) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for (asset, kind) in items {
         match kind {
-            Kind::Js | Kind::Html => scan_specifiers(&asset.bytes, &mut out),
+            // Root-absolute paths are read out of HTML only. In HTML `href="/x.svg"` is
+            // unambiguously a bundle asset; in minified JS a quoted `/name.ext` is far
+            // more often a fragment being concatenated or an in-memory path, and every
+            // such hit is a false `--strict` failure. Measured across seven shipped
+            // apps, allowing it in JS produced six false positives and no true ones:
+            // `"".concat(cfg.paths.vs,"/loader.js")`, `od(t,`node_modules`,e,`package.json`)`,
+            // and `WriteImage(r,"/image.png")` (an emscripten FS path) among them.
+            Kind::Html => scan_specifiers(&asset.bytes, &mut out, true),
+            Kind::Js => scan_specifiers(&asset.bytes, &mut out, false),
             Kind::Css => scan_urls(&asset.bytes, &mut out),
             _ => {}
         }
@@ -37,18 +45,42 @@ fn name_char(b: u8) -> bool {
     matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-')
 }
 
-// `"assets/x-HASH.js"` / `"./x-HASH.js"`. The name must terminate on a quote or paren:
-// a run that stops mid-identifier is some other string, not a module specifier.
-fn scan_specifiers(bytes: &[u8], out: &mut BTreeSet<String>) {
-    for marker in [b"assets/".as_slice(), b"./".as_slice()] {
+// `"assets/x-HASH.js"` / `"./x-HASH.js"` / `"/favicon.ico"`. The name must terminate on a
+// quote or paren: a run that stops mid-identifier is some other string, not a specifier.
+//
+// `root_absolute` adds the bare `/` marker, which the first two miss entirely: a shipped
+// `index.html` carrying `href="/vite.svg"` reported clean while vite.svg was never
+// extracted. Only HTML enables it (see `referenced`). Even there it is guarded on an
+// opening quote so a remote or protocol-relative URL is not read as a local reference.
+fn scan_specifiers(bytes: &[u8], out: &mut BTreeSet<String>, root_absolute: bool) {
+    let markers: &[&[u8]] = if root_absolute {
+        &[b"assets/", b"./", b"/"]
+    } else {
+        &[b"assets/", b"./"]
+    };
+    for marker in markers.iter().copied() {
         let mut i = 0;
         while i + marker.len() < bytes.len() {
             let Some(rel) = bytes[i..].windows(marker.len()).position(|w| w == marker) else { break };
-            let s = i + rel + marker.len();
+            let start = i + rel;
+            let s = start + marker.len();
+            // A root-absolute reference must be a whole quoted string. Two rejects, both
+            // measured on a real bundle: an unquoted slash is any old path fragment, and
+            // a *concatenated* one is a URL being built, not a local asset — the analytics
+            // call `"/array/"+t.config.token+"/config.js"` was reported missing until the
+            // `+` on either side was ruled out.
+            let mut quoted = false;
+            if marker == b"/" {
+                let open = match start.checked_sub(1) { Some(o) => o, None => { i = s; continue; } };
+                if !matches!(bytes[open], b'"' | b'\'' | b'`') { i = s; continue; }
+                if open > 0 && bytes[open - 1] == b'+' { i = s; continue; }
+                quoted = true;
+            }
             let mut e = s;
             while e < bytes.len() && name_char(bytes[e]) { e += 1; }
             let terminated = e < bytes.len() && matches!(bytes[e], b'"' | b'\'' | b'`' | b')');
-            if terminated && e > s {
+            let concatenated = quoted && bytes.get(e + 1) == Some(&b'+');
+            if terminated && !concatenated && e > s {
                 if let Ok(name) = std::str::from_utf8(&bytes[s..e]) {
                     if kind_from_ext(name).is_some() { out.insert(name.to_string()); }
                 }
@@ -83,10 +115,35 @@ mod tests {
     use super::*;
 
     fn item(bytes: &[u8], kind: Kind) -> (Asset, Kind) {
-        (Asset { offset: 0, compressed_len: 1, bytes: bytes.to_vec(), name: None }, kind)
+        (Asset { offset: 0, compressed_len: 1, bytes: bytes.to_vec(), name: None, path: None }, kind)
     }
     fn entry(name: &str) -> Entry {
         Entry { name: name.into(), original_name: None, kind: "js".into(), offset: 0, compressed_len: 1, decompressed_len: 1, alias_of: None }
+    }
+
+    // Root-absolute references were invisible to the scan, so a bundle whose index.html
+    // carries `href="/vite.svg"` reported clean with vite.svg never extracted. The two
+    // rejects keep that from becoming noise: a bare path inside a URL, and a fragment
+    // being concatenated into one. Mutation check: drop the `+` guard and config.js
+    // (a real analytics endpoint from a shipped binary) is reported missing.
+    #[test]
+    fn sees_a_root_absolute_reference_but_not_a_built_url() {
+        let mut out = BTreeSet::new();
+        scan_specifiers(br#"<link href="/vite.svg"><script src="/app.js"></script>"#, &mut out, true);
+        scan_specifiers(br#"<img src="https://cdn.example.com/remote.js"><a href="//cdn.io/p.js">"#, &mut out, true);
+        assert!(out.contains("vite.svg"), "got {out:?}");
+        assert!(out.contains("app.js"), "got {out:?}");
+        assert!(!out.contains("remote.js"), "a remote URL is not a local asset");
+        assert!(!out.contains("p.js"), "a protocol-relative URL is not a local asset");
+
+        // The same spellings inside JS must stay invisible: every one of these is a real
+        // false positive measured on a shipped app, and each would fail `--strict`.
+        let mut js = BTreeSet::new();
+        scan_specifiers(br#"x.concat(t.config.paths.vs,"/loader.js")"#, &mut js, false);
+        scan_specifiers(br#"od(t,`node_modules`,e,`package.json`)"#, &mut js, false);
+        scan_specifiers(br#"e.WriteImage(r,"/image.png")"#, &mut js, false);
+        scan_specifiers(br#"endpointFor("assets","/array/"+t.token+"/config.js")"#, &mut js, false);
+        assert!(js.is_empty(), "root-absolute paths in JS must not be reported: {js:?}");
     }
 
     // The safety net: a chunk the bundle imports but the extraction never wrote is
