@@ -105,11 +105,12 @@ pub fn write(out_dir: &Path, items: &[(Asset, Kind)], manifest_only: bool, tree:
                 if tree { "index.html".to_string() } else { "html/index.html".to_string() }
             }
             None => {
+                let file_ext = crate::classify::magic_ext(&asset.bytes).unwrap_or(ext);
                 let idx = counts.entry(ext).or_insert(0);
-                let mut candidate = format!("{}/{:03}.{}", ext, *idx, ext);
+                let mut candidate = format!("{}/{:03}.{}", ext, *idx, file_ext);
                 *idx += 1;
                 while used.contains(&candidate) {
-                    candidate = format!("{}/{:03}.{}", ext, *idx, ext);
+                    candidate = format!("{}/{:03}.{}", ext, *idx, file_ext);
                     *idx += 1;
                 }
                 candidate
@@ -206,6 +207,20 @@ mod tests {
         assert!(dir.join("html/index.html").exists());
         assert!(dir.join("css/000.css").exists());
         assert!(dir.join("assets.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A keyless asset whose format was sniffed keeps its real extension (`img/000.png`,
+    // not `img/000.img`). Mutation check: drop the `magic_ext` lookup and this fails.
+    #[test]
+    fn keyless_sniffed_asset_keeps_its_real_extension() {
+        let dir = std::env::temp_dir().join(format!("tu-test-magic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let items = vec![
+            (Asset { offset: 1, compressed_len: 5, bytes: b"\x89PNG\r\n\x1a\n\0".to_vec(), name: None, path: None }, Kind::Image),
+        ];
+        let entries = write(&dir, &items, true, false).unwrap();
+        assert_eq!(entries[0].name, "img/000.png");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

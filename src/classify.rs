@@ -48,7 +48,35 @@ pub fn classify_asset(name: Option<&str>, bytes: &[u8]) -> Kind {
     }
 }
 
+// The file extension a keyless stream's leading bytes prove, for formats with a real
+// signature. Only strong magic: a keyless decode can be binary noise, and a false match
+// would turn junk back into output.
+pub fn magic_ext(b: &[u8]) -> Option<&'static str> {
+    let at = |i: usize, m: &[u8]| b.get(i..i + m.len()) == Some(m);
+    Some(match () {
+        _ if at(0, b"\x89PNG\r\n\x1a\n") => "png",
+        _ if at(0, b"\xff\xd8\xff") => "jpg",
+        _ if at(0, b"GIF87a") || at(0, b"GIF89a") => "gif",
+        _ if at(0, b"RIFF") && at(8, b"WEBP") => "webp",
+        _ if at(0, b"RIFF") && at(8, b"WAVE") => "wav",
+        _ if at(4, b"ftypavif") || at(4, b"ftypavis") => "avif",
+        _ if at(4, b"ftyp") => "mp4",
+        _ if at(0, b"wOF2") => "woff2",
+        _ if at(0, b"wOFF") => "woff",
+        _ if at(0, b"OTTO") => "otf",
+        _ if at(0, b"\x1a\x45\xdf\xa3") => "webm",
+        _ if at(0, b"OggS") => "ogg",
+        _ if at(0, b"ID3") => "mp3",
+        _ if at(0, b"\0asm") => "wasm",
+        _ => {
+            let head = String::from_utf8_lossy(&b[..b.len().min(1024)]).trim_start().to_ascii_lowercase();
+            if head.starts_with("<svg") || (head.starts_with("<?xml") && head.contains("<svg")) { "svg" } else { return None }
+        }
+    })
+}
+
 pub fn classify(bytes: &[u8]) -> Kind {
+    if let Some(ext) = magic_ext(bytes) { return kind_of_ext(ext).unwrap_or(Kind::Other); }
     let n = bytes.len().min(4096);
     // printable ratio gate: reject binary
     let printable = bytes[..n].iter().filter(|b| matches!(b, 9|10|13|32..=126)).count();
@@ -60,8 +88,9 @@ pub fn classify(bytes: &[u8]) -> Kind {
 
     if lower.starts_with("<!doctype") || lower.starts_with("<html") { return Kind::Html; }
 
-    // JSON before CSS: shiki grammars are JSON objects that contain css-ish words
-    if (s.starts_with('{') || s.starts_with('[')) && serde_json::from_str::<serde_json::Value>(s.trim_end()).is_ok() {
+    // JSON before CSS: shiki grammars are JSON objects that contain css-ish words. Parse
+    // the whole document: a 4KB prefix of anything larger is never valid JSON.
+    if (s.starts_with('{') || s.starts_with('[')) && serde_json::from_slice::<serde::de::IgnoredAny>(bytes).is_ok() {
         return Kind::Json;
     }
 
@@ -85,7 +114,9 @@ pub fn classify(bytes: &[u8]) -> Kind {
         || s.contains("@keyframes")
         || s.contains("@charset")
         || s.contains(":root");
-    if strong || declaration_count(s) >= 3 {
+    // A lone rule (`sel{prop:value}`) is a whole stylesheet too: scoped component CSS.
+    let one_rule = n == bytes.len() && s.trim_end().ends_with('}') && !s.starts_with('{') && s.contains('{');
+    if strong || declaration_count(s) >= 3 || (one_rule && declaration_count(s) >= 1) {
         return Kind::Css;
     }
 
@@ -148,13 +179,13 @@ mod tests {
         assert_eq!(classify(b".a{color:red;margin:0;padding:0}.b{display:flex}"), Kind::Css);
     }
 
-    // A font's bytes sniff as binary and used to be dropped as `Bin`; the record's own
-    // extension is authoritative. Mutation check: drop the `kind_from_ext` lookup from
-    // `classify_asset` and the woff2 assertion fails (it comes back `Other`).
+    // The record's own extension is authoritative over content sniffing.
+    // Mutation check: drop the `kind_from_ext` lookup from `classify_asset` and the
+    // font assertion fails (unknown bytes come back `Other`).
     #[test]
     fn extension_beats_content_sniffing_for_named_records() {
-        let woff2 = [0x77, 0x4f, 0x46, 0x32, 0x00, 0x01, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x03];
-        assert_eq!(classify(&woff2), Kind::Bin, "content sniffing alone cannot see a font");
+        let woff2 = [0x03, 0x9f, 0x46, 0x32, 0x00, 0x01, 0x00, 0x00, 0xff, 0xfe, 0x00, 0x03];
+        assert_eq!(classify(&woff2), Kind::Bin, "fixture precondition: bytes no magic matches");
         assert_eq!(classify_asset(Some("KaTeX_Main-Bold-I9j0K1l2.woff2"), &woff2), Kind::Font);
         assert_eq!(Kind::Font.ext(), "font", "fonts are written under font/");
         assert_eq!(classify_asset(Some("logo-A1B2C3D4.svg"), b"<svg viewBox=\"0 0 1 1\"/>"), Kind::Image);
@@ -163,6 +194,50 @@ mod tests {
         assert_eq!(classify_asset(Some("data-A1B2C3D4.wasm"), &woff2), Kind::Other);
         // a keyless unidentifiable stream stays Bin
         assert_eq!(classify_asset(None, &woff2), Kind::Bin);
+    }
+
+    // A keyless binary asset used to fall to `Bin` and be dropped unless --raw, which lost
+    // real PNGs, WebPs and videos whenever the key was pooled away from the stream (common
+    // on ELF). Mutation check: make `magic_ext` return None and every assertion fails.
+    #[test]
+    fn sniffs_keyless_binary_formats_by_magic() {
+        let cases: &[(&[u8], &str, Kind)] = &[
+            (b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR", "png", Kind::Image),
+            (b"\xff\xd8\xff\xe0\0\x10JFIF", "jpg", Kind::Image),
+            (b"GIF89a\x01\0\x01\0", "gif", Kind::Image),
+            (b"RIFF\x24\0\0\0WEBPVP8 ", "webp", Kind::Image),
+            (b"\0\0\0\x1cftypavif\0\0\0\0", "avif", Kind::Image),
+            (b"wOF2\0\x01\0\0\0\0", "woff2", Kind::Font),
+            (b"\0\0\0\x20ftypisom\0\0\x02\0", "mp4", Kind::Other),
+            (b"\0asm\x01\0\0\0", "wasm", Kind::Other),
+        ];
+        for (bytes, ext, kind) in cases {
+            assert_eq!(magic_ext(bytes), Some(*ext), "{ext}");
+            assert_eq!(classify_asset(None, bytes), *kind, "{ext}");
+        }
+    }
+
+    // SVG is text but is none of html/css/js/json, so it fell through to `Bin`.
+    #[test]
+    fn detects_keyless_svg() {
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"><path d=\"M0 0\"/></svg>";
+        assert_eq!(classify(svg), Kind::Image);
+        assert_eq!(magic_ext(b"<?xml version=\"1.0\"?>\n<svg></svg>"), Some("svg"));
+    }
+
+    // JSON was parsed off a 4KB prefix, which is never valid JSON for a larger document
+    // (a 213KB source map was dropped). Mutation check: parse `head` again and this fails.
+    #[test]
+    fn detects_json_larger_than_the_sniff_prefix() {
+        let big = format!("{{\"version\":3,\"names\":[{}\"x\"]}}", "\"mixNumber\",".repeat(1000));
+        assert!(big.len() > 4096);
+        assert_eq!(classify(big.as_bytes()), Kind::Json);
+    }
+
+    // A whole stylesheet can be a single rule (a scoped Vue component's CSS).
+    #[test]
+    fn detects_single_rule_stylesheet() {
+        assert_eq!(classify(b".filter-pills__chips[data-v-77375c40]{filter:drop-shadow(0 1px 1.5px #00000026)}"), Kind::Css);
     }
 
     // One lone declaration is not enough to call something CSS.

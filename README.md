@@ -135,14 +135,14 @@ Kanri's `.AppImage`.
   stream. Assets found only by chaining, with no record of their own, fall
   back to `<kind>/NNN.ext` (the keyless root document is named `index.html`).
   The bytes are always exact.
-- **Linux builds lose more names, and occasionally content, than macOS
-  builds.** The ELF linker often pools an asset's key string together with
-  other strings instead of placing it right before the asset's stream, so
-  that asset can only be found by the chain walk and comes out unnamed
-  (`js/000.js`). Most still come out, but a few do not: comparing the same
-  app versions on both platforms, Yaak's Linux build missed 3 of 319 assets
-  (pdf.js `.bcmap` files) and Spacedrive's missed 7 of 686 (images and a
-  video) that the macOS builds recovered. `--strict` reports these.
+- **Linux builds lose more original filenames than macOS builds.** The ELF
+  linker often pools an asset's key string with other strings instead of
+  placing it right before the asset's stream, so the asset is found by the
+  chain walk and comes out unnamed. Unnamed assets are typed by their
+  content (`img/000.png`, `json/000.json`); one in a format untauri cannot
+  recognise (e.g. pdf.js `.bcmap`) is only written with `--raw`. Comparing the
+  same app versions on both platforms, that cost Yaak's Linux build 3 of 319
+  assets, and nothing else was lost.
 - **A single asset whose *compressed* size exceeds 4MB may not be
   recovered**, due to a bounded per-decode probe window. That is a real
   ceiling, not a soft one. It used to be 1MB, which sat under the largest
