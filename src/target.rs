@@ -29,7 +29,8 @@ fn ranges_for(data: &[u8]) -> Vec<Range<usize>> {
     if let Ok(file) = object::File::parse(data) {
         for sec in file.sections() {
             if let Ok(name) = sec.name() {
-                if name == "__const" || name == "__cstring" {
+                // Mach-O keeps the embedded assets in __const/__cstring, ELF in .rodata.
+                if matches!(name, "__const" | "__cstring" | ".rodata") {
                     if let Some((off, size)) = sec.file_range() {
                         let (o, s) = (off as usize, size as usize);
                         if let Some(e) = o.checked_add(s) {
@@ -51,6 +52,21 @@ mod tests {
     fn falls_back_to_whole_file_for_non_macho() {
         let data = vec![1u8, 2, 3, 4, 5, 6, 7, 8];
         assert_eq!(ranges_for(&data), vec![0..8]);
+    }
+    #[test]
+    fn scans_only_elf_rodata() {
+        use object::write::{Object as W, StreamingBuffer};
+        use object::{Architecture, BinaryFormat, Endianness, SectionKind};
+        let mut w = W::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+        let text = w.add_section(vec![], b".text".to_vec(), SectionKind::Text);
+        w.append_section_data(text, &[0x90; 16], 1);
+        let ro = w.add_section(vec![], b".rodata".to_vec(), SectionKind::ReadOnlyData);
+        w.append_section_data(ro, b"/assets/x.js", 1);
+        let mut data = Vec::new();
+        w.emit(&mut StreamingBuffer::new(&mut data)).unwrap();
+        let r = ranges_for(&data);
+        assert_eq!(r.len(), 1);
+        assert_eq!(&data[r[0].clone()], b"/assets/x.js");
     }
     #[test]
     fn resolve_returns_path_itself_for_plain_file() {

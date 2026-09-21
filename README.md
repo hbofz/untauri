@@ -39,6 +39,18 @@ Also accepts a raw executable in place of a `.app` bundle:
 untauri ./MyApp -o ./out
 ```
 
+On Linux, point it at the ELF binary inside the package. Unpack the package
+first (none of these run the app):
+
+```
+dpkg-deb -x MyApp.deb pkg          # .deb (or: ar x MyApp.deb && tar xf data.tar.*)
+rpm2cpio MyApp.rpm | cpio -idm     # .rpm
+7z x MyApp.AppImage -opkg          # .AppImage
+untauri pkg/usr/bin/my-app -o ./out
+```
+
+Avoid `--appimage-extract` on an app you don't trust: it runs the AppImage.
+
 Flags:
 
 | Flag | Meaning |
@@ -86,8 +98,8 @@ binary, compressed length, and decompressed length.
 
 ## How it works
 
-1. Parses the Mach-O and locates its read-only data sections (`__const`,
-   `__cstring`).
+1. Parses the binary and locates its read-only data sections (`__const` and
+   `__cstring` in a Mach-O, `.rodata` in an ELF).
 2. Scans for the `/assets/` literal. Each asset is stored as
    `/assets/<filename><brotli stream>` with no length field, so every record
    announces itself and its own real filename. This is the primary
@@ -106,17 +118,31 @@ Verified against a real Tauri app: recovered 479 assets
 one command, with every referenced asset resolved. The chain walk alone got
 388 of them and said nothing about the other 91.
 
+On Linux, verified against the x86_64 `.deb` builds of nine Tauri 1 and 2
+apps: Kanri, Pot, Surrealist, Modrinth, Clash Verge Rev, Jan, Yaak,
+Spacedrive and a Pake wrapper (Excalidraw), from 2 to 839 assets each, plus
+Kanri's `.AppImage`.
+
 ## Limitations (read before relying on this)
 
-- **v1 targets macOS Mach-O (arm64) with brotli-compressed assets only.**
-  Windows and Linux binaries, and any other compression scheme, are not
-  supported yet.
+- **Supports macOS Mach-O and Linux ELF binaries with brotli-compressed
+  assets.** Windows binaries and any other compression scheme are not
+  supported yet. Linux packages (`.deb`, `.rpm`, `.AppImage`) must be
+  unpacked first; see Usage.
 - **Content recovery is the guarantee. Original filenames are best-effort.**
   Almost every asset is written under its real hashed name (e.g.
   `main-[hash].css`), taken from the `/assets/` record that precedes its
   stream. Assets found only by chaining, with no record of their own, fall
   back to `<kind>/NNN.ext` (the keyless root document is named `index.html`).
   The bytes are always exact.
+- **Linux builds lose more names, and occasionally content, than macOS
+  builds.** The ELF linker often pools an asset's key string together with
+  other strings instead of placing it right before the asset's stream, so
+  that asset can only be found by the chain walk and comes out unnamed
+  (`js/000.js`). Most still come out, but a few do not: comparing the same
+  app versions on both platforms, Yaak's Linux build missed 3 of 319 assets
+  (pdf.js `.bcmap` files) and Spacedrive's missed 7 of 686 (images and a
+  video) that the macOS builds recovered. `--strict` reports these.
 - **A single asset whose *compressed* size exceeds 4MB may not be
   recovered**, due to a bounded per-decode probe window. That is a real
   ceiling, not a soft one. It used to be 1MB, which sat under the largest
