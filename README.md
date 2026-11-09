@@ -58,6 +58,44 @@ After extracting, untauri also scans the recovered JS, CSS and HTML for files th
 reference and tells you about any that aren't in the app. Those are usually loaded from
 the network or never used.
 
+## Inspect
+
+`untauri inspect` reports what an app is built with and what its frontend calls,
+without extracting anything:
+
+```
+$ untauri inspect kanri
+binary    Elf X86_64
+tauri     2.8.5
+runtime   tao 0.34.3, tauri-runtime 2.8.0, tauri-runtime-wry 2.8.1, tauri-utils 2.7.0, wry 0.53.3
+plugins   autostart 2.5.0, dialog 2.4.0, fs 2.4.2, log 2.7.0, os 2.3.1, persisted-scope 2.3.2, ...
+crates    90 found with versions, a lower bound (--lockfile to audit them)
+frontend  61 files, 2732 KB, brotli
+
+IPC referenced by the frontend: 30 plugin commands, 0 literal invoke() calls.
+Both are lower bounds, and referenced is not granted: the app's capabilities decide what runs.
+  dialog: ask, message, open, save
+  fs: exists, read_text_file, write_text_file
+  ...
+```
+
+Versions come from the source paths the Rust compiler leaves in release builds. Each
+one is exact, but only crates with code that can panic leave a path, so the list is a
+lower bound (macro and build-time crates never appear). Dependencies built from git,
+like a Tauri commit, are listed with their commit instead. To check the crates found
+for known vulnerabilities:
+
+```
+untauri inspect MyApp --lockfile app.lock
+cargo audit -f app.lock
+```
+
+A clean audit does not prove the app is clean, only that none of the crates found
+have advisories. The IPC list is also a lower bound: it catches `plugin:` strings and
+literal `invoke("...")` calls, but not calls made through a minified alias.
+
+`--json` prints the full report, including every crate.
+
 ## Tested on
 
 Every file, under its real name, compared byte for byte against the app's own table:
