@@ -8,6 +8,12 @@ Tauri doesn't ship your frontend as loose files. It compresses every file and ba
 it into the executable, with a lookup table of names. untauri reads that table and
 writes every file back out under its original name.
 
+> [!WARNING]
+> Only use untauri on software you own or have explicit permission to analyze.
+> It does not give you any right to copy, modify or redistribute someone else's app,
+> and you are responsible for complying with the license and terms of any software
+> you run it on. Provided as is, without warranty (see [LICENSE](LICENSE)).
+
 ## Install
 
 ```
@@ -81,17 +87,6 @@ If no table is found, untauri falls back to scanning the binary for brotli strea
 mode is a best guess: it can miss files, lose names, and pick up noise, and it says so
 when it runs.
 
-## Compared to tauri-dumper
-
-[tauri-dumper](https://github.com/Mas0nShi/tauri-dumper) reads the same table and got
-identical output on every app above that it could open. It can also patch files back
-into a binary, which untauri can't. untauri additionally handles:
-
-- apps built without compression (tauri-dumper finds nothing in Jan)
-- universal macOS binaries
-- binaries with no readable table, through the fallback scanner
-- checking the recovered code for references to missing files
-
 ## Limits
 
 - Each file is capped at 64MB decompressed, as a guard against decompression bombs.
@@ -100,11 +95,6 @@ into a binary, which untauri can't. untauri additionally handles:
 - The table reader handles 64-bit binaries. 32-bit builds (i686 Windows, for example)
   fall back to the scanner.
 - You get the built frontend, not your source: minified, bundled, without the Rust side.
-
-## Why
-
-To audit what an app actually ships (API keys in the JS, anyone?), or to recover your
-own frontend after losing the source. Not for cloning other people's apps.
 
 ## License
 
