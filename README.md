@@ -2,12 +2,7 @@
 
 Get the web frontend (HTML, CSS, JS, fonts, images) back out of a compiled Tauri app.
 
-```
-$ untauri Surrealist.app -o out --tree
-read Tauri's asset table: 648 entries (brotli)
-recovered 648 assets -> out
-complete: all 648 entries in the app's asset table were extracted.
-```
+![untauri extracting Jan's 559 frontend files](docs/demo.gif)
 
 Tauri doesn't ship your frontend as loose files. It compresses every file and bakes
 it into the executable, with a lookup table of names. untauri reads that table and
