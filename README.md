@@ -11,9 +11,7 @@ writes every file back out under its original name.
 ## Install
 
 ```
-git clone https://github.com/hbofz/untauri
-cd untauri
-cargo install --path .
+cargo install untauri
 ```
 
 ## Usage
