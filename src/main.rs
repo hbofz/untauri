@@ -6,6 +6,7 @@ mod check;
 mod classify;
 mod output;
 mod scan;
+mod table;
 mod target;
 
 use classify::{classify_asset, Kind};
@@ -33,7 +34,7 @@ struct Cli {
     /// so the output directory can be served as-is
     #[arg(long)]
     tree: bool,
-    /// Exit non-zero when the recovered bundle references something that was not extracted
+    /// Exit non-zero if any file failed to extract
     #[arg(long)]
     strict: bool,
 }
@@ -45,13 +46,27 @@ fn main() -> ExitCode {
         Err(e) => { eprintln!("error: not a readable binary: {} ({e})", cli.path.display()); return ExitCode::from(1); }
     };
 
-    let mut assets: Vec<scan::Asset> = Vec::new();
-    let mut undecoded: Vec<String> = Vec::new();
-    for r in &loaded.ranges {
-        let (found, failed) = scan::walk(&loaded.data, r.clone());
-        assets.extend(found);
-        undecoded.extend(failed);
-    }
+    // Tauri's own asset table gives every file's exact name and bytes. Only when there
+    // is none (an unusual build, or a format the reader does not know) fall back to
+    // scanning the binary for brotli streams, which is a guess and can pick up noise.
+    let (assets, undecoded, from_table) = match table::read(&loaded.data) {
+        Some(t) => {
+            eprintln!("read Tauri's asset table: {} entries ({})", t.assets.len() + t.undecoded.len(),
+                if t.compressed { "brotli" } else { "uncompressed" });
+            (t.assets, t.undecoded, true)
+        }
+        None => {
+            eprintln!("no Tauri asset table found; falling back to scanning for brotli streams (names and completeness are best-effort)");
+            let (mut a, mut u) = (Vec::new(), Vec::new());
+            for r in &loaded.ranges {
+                let (found, failed) = scan::walk(&loaded.data, r.clone());
+                a.extend(found);
+                u.extend(failed);
+            }
+            (a, u, false)
+        }
+    };
+    let table_len = assets.len() + undecoded.len();
 
     let stream_count = assets.len();
     let mut items: Vec<(scan::Asset, Kind)> = assets.into_iter()
@@ -59,8 +74,10 @@ fn main() -> ExitCode {
         .filter(|(_, k)| cli.raw || *k != Kind::Bin)
         .collect();
 
-    if items.is_empty() {
-        eprintln!("found {stream_count} streams, none looked like web assets — this may not be a Tauri app, or it's a debug build with loose assets.");
+    // No HTML, JS or CSS means no frontend was found, whatever else decoded. Saying
+    // "complete" over a pile of decoded noise is the worst possible answer.
+    if !items.iter().any(|(_, k)| matches!(k, Kind::Html | Kind::Js | Kind::Css)) {
+        eprintln!("found {stream_count} streams but no HTML/JS/CSS: no web frontend recovered. This may not be a Tauri app, or it is a debug build that loads assets from disk.");
         return ExitCode::from(2);
     }
 
@@ -76,15 +93,28 @@ fn main() -> ExitCode {
     };
     eprintln!("recovered {} assets -> {}", entries.len(), cli.out.display());
 
+    if from_table {
+        if undecoded.is_empty() {
+            eprintln!("complete: all {table_len} entries in the app's asset table were extracted.");
+        } else {
+            eprintln!("warning: {} of {table_len} table entries did not decode:", undecoded.len());
+            for u in &undecoded { eprintln!("  undecoded: {u}"); }
+        }
+    }
     let missing = check::missing(&items, &entries);
     if missing.is_empty() {
-        eprintln!("completeness: every JS/CSS chunk and font the bundle names (mapDeps, ./chunk imports, CSS url()) was extracted.");
-        ExitCode::SUCCESS
+        eprintln!("references: every JS/CSS chunk and font the bundle names (mapDeps, ./chunk imports, CSS url()) was extracted.");
+    } else if from_table {
+        // The table is everything the app embeds, so these are not extraction gaps: the
+        // app loads them from elsewhere (network, disk, a runtime-built path) or never does.
+        eprintln!("note: {} name(s) referenced by the bundle are not in the app's asset table (loaded from elsewhere at runtime, or unused):", missing.len());
+        for m in &missing { eprintln!("  not embedded: {m}"); }
     } else {
         eprintln!("warning: {} asset(s) named by the recovered bundle were NOT extracted:", missing.len());
         for m in &missing { eprintln!("  missing: {m}"); }
-        if cli.strict { ExitCode::from(3) } else { ExitCode::SUCCESS }
     }
+    let incomplete = !undecoded.is_empty() || (!from_table && !missing.is_empty());
+    if cli.strict && incomplete { ExitCode::from(3) } else { ExitCode::SUCCESS }
 }
 
 // A record whose stream will not decode may be a Vite duplicate: two emitted names for
