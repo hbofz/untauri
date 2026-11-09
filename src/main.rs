@@ -1,9 +1,10 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 mod check;
 mod classify;
+mod inspect;
 mod output;
 mod scan;
 mod table;
@@ -13,10 +14,13 @@ use classify::{classify_asset, Kind};
 
 /// Extract the embedded web frontend out of a compiled Tauri app binary.
 #[derive(Parser, Debug)]
-#[command(name = "untauri", version, about)]
+#[command(name = "untauri", version, about, args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 struct Cli {
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
     /// Path to a .app bundle or a raw executable
-    path: PathBuf,
+    #[arg(required = true)]
+    path: Option<PathBuf>,
     /// Output directory
     #[arg(short, long, default_value = "unpacked")]
     out: PathBuf,
@@ -39,33 +43,66 @@ struct Cli {
     strict: bool,
 }
 
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-    let loaded = match target::load(&cli.path) {
-        Ok(l) => l,
-        Err(e) => { eprintln!("error: not a readable binary: {} ({e})", cli.path.display()); return ExitCode::from(1); }
-    };
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// Report what an app is built with and what its frontend can call, without extracting
+    Inspect {
+        /// Path to a .app bundle or a raw executable
+        path: PathBuf,
+        /// Print the report as JSON
+        #[arg(long)]
+        json: bool,
+        /// Write every crate version found as a Cargo.lock, for `cargo audit -f <FILE>`
+        #[arg(long, value_name = "FILE")]
+        lockfile: Option<PathBuf>,
+    },
+}
 
-    // Tauri's own asset table gives every file's exact name and bytes. Only when there
-    // is none (an unusual build, or a format the reader does not know) fall back to
-    // scanning the binary for brotli streams, which is a guess and can pick up noise.
-    let (assets, undecoded, from_table) = match table::read(&loaded.data) {
-        Some(t) => {
+pub struct Recovered {
+    pub assets: Vec<scan::Asset>,
+    pub undecoded: Vec<String>,
+    pub from_table: bool,
+    pub compressed: bool,
+}
+
+// Tauri's own asset table gives every file's exact name and bytes. Only when there is
+// none (an unusual build, or a format the reader does not know) fall back to scanning
+// the binary for brotli streams, which is a guess and can pick up noise.
+pub fn recover(loaded: &target::Loaded, log: bool) -> Recovered {
+    if let Some(t) = table::read(&loaded.data) {
+        if log {
             eprintln!("read Tauri's asset table: {} entries ({})", t.assets.len() + t.undecoded.len(),
                 if t.compressed { "brotli" } else { "uncompressed" });
-            (t.assets, t.undecoded, true)
         }
-        None => {
-            eprintln!("no Tauri asset table found; falling back to scanning for brotli streams (names and completeness are best-effort)");
-            let (mut a, mut u) = (Vec::new(), Vec::new());
-            for r in &loaded.ranges {
-                let (found, failed) = scan::walk(&loaded.data, r.clone());
-                a.extend(found);
-                u.extend(failed);
-            }
-            (a, u, false)
-        }
-    };
+        return Recovered { assets: t.assets, undecoded: t.undecoded, from_table: true, compressed: t.compressed };
+    }
+    if log { eprintln!("no Tauri asset table found; falling back to scanning for brotli streams (names and completeness are best-effort)"); }
+    let (mut assets, mut undecoded) = (Vec::new(), Vec::new());
+    for r in &loaded.ranges {
+        let (found, failed) = scan::walk(&loaded.data, r.clone());
+        assets.extend(found);
+        undecoded.extend(failed);
+    }
+    Recovered { assets, undecoded, from_table: false, compressed: true }
+}
+
+fn load(path: &std::path::Path) -> Option<target::Loaded> {
+    match target::load(path) {
+        Ok(l) => Some(l),
+        Err(e) => { eprintln!("error: not a readable binary: {} ({e})", path.display()); None }
+    }
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    if let Some(Cmd::Inspect { path, json, lockfile }) = &cli.cmd {
+        let Some(loaded) = load(path) else { return ExitCode::from(1) };
+        return inspect::run(&loaded, *json, lockfile.as_deref());
+    }
+    let Some(path) = cli.path.as_deref() else { return ExitCode::from(2) }; // clap enforces it
+    let Some(loaded) = load(path) else { return ExitCode::from(1) };
+
+    let Recovered { assets, undecoded, from_table, .. } = recover(&loaded, true);
     let table_len = assets.len() + undecoded.len();
 
     let stream_count = assets.len();
