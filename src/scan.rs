@@ -47,6 +47,15 @@ fn try_decode_at_capped(data: &[u8], off: usize, max_out: usize) -> Option<(Vec<
     }
 }
 
+// Decode exactly the brotli stream at data[off..off+len]: it must finish and consume
+// every byte. The asset table gives the true length, so anything else is not a stream.
+pub fn decode_exact(data: &[u8], off: usize, len: usize) -> Option<Vec<u8>> {
+    match decode(data, off, off.checked_add(len)?, MAX_OUT, false) {
+        Decoded::Asset(bytes, consumed) if consumed == len => Some(bytes),
+        _ => None,
+    }
+}
+
 enum Decoded {
     Asset(Vec<u8>, usize), // fully decoded: bytes + true compressed length
     Binary,                // valid brotli but decompresses to non-text (font/wasm/garbage)
