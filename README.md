@@ -16,6 +16,9 @@ writes every file back out under its original name.
 
 ## Install
 
+Download a prebuilt binary for Windows, macOS or Linux from
+[Releases](https://github.com/hbofz/untauri/releases/latest), or with Rust installed:
+
 ```
 cargo install untauri
 ```
