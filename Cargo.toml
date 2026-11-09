@@ -6,7 +6,7 @@ description = "Extract the embedded web frontend out of a compiled Tauri app bin
 license = "MIT"
 repository = "https://github.com/hbofz/untauri"
 readme = "README.md"
-keywords = ["tauri", "reverse-engineering", "brotli", "unpacker", "macos", "linux"]
+keywords = ["tauri", "reverse-engineering", "unpacker", "extract", "frontend"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
