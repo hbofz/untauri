@@ -6,7 +6,7 @@
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 cd "$here/work" && rm -rf out check kanri-patched
-export PATH="$root/target/release:$PATH"
+export PATH="$root/target/release:$PATH" DEMO_RC="$here/bashrc"
 tmux -L untauri-demo kill-server 2>/dev/null
 exec tmux -L untauri-demo -f "$here/tmux.conf" new-session -c "$here/work" \; \
   split-window -h -l 33% -c "$here/work" "watch -t -c -n 0.2 bash '$here/tree.sh'" \; select-pane -L

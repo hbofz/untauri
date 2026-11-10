@@ -6,6 +6,11 @@ Set Height 600
 Set Padding 14
 Set Theme "Catppuccin Mocha"
 Set TypingSpeed 30ms
+Set WindowBar Colorful
+Set WindowBarSize 36
+Set BorderRadius 10
+Set Margin 12
+Set MarginFill "#11111b"
 
 Hide
 Type "bash docs/demo/start.sh"
