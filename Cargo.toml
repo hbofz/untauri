@@ -2,7 +2,7 @@
 name = "untauri"
 version = "0.4.0"
 edition = "2021"
-description = "Extract the embedded web frontend out of a compiled Tauri app binary"
+description = "Unpack compiled Tauri apps: frontend, original source, and what's inside."
 license = "MIT"
 repository = "https://github.com/hbofz/untauri"
 readme = "README.md"
