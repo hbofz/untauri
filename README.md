@@ -111,6 +111,40 @@ literal `invoke("...")` calls, but not calls made through a minified alias.
 
 `--json` prints the full report, including every crate.
 
+## Repack
+
+Edit the extracted files, then write them back into the app:
+
+```
+untauri MyApp.app -o out --tree
+# edit out/index.html, out/assets/main-A1b2C3d4.js, ...
+untauri repack MyApp.app out -o patched-binary
+```
+
+`--tree` keeps the app's own paths, so `out/index.html` is the real root page. (The
+default layout works too, but a multi-page app has several `index.html` files there;
+`assets.json` maps each output file to its key.)
+
+Only files that differ from the app's own are written back. Each one is compressed
+at whichever brotli level gives the smallest result, then written over the original,
+with the table entry's length updated. Nothing else in the binary moves. Before
+writing, untauri reads the patched binary back and checks that every edited file
+comes out as you left it and every other file is untouched. It also refuses a
+directory extracted from a different build of the app, so edits made against an
+older version never get written into a newer one.
+
+- An edited file has to fit in the space its original took. That room is per file:
+  big files usually have a few KB to spare, tiny ones next to none. Uncompressed
+  builds have none at all, so an edit can't make a file bigger.
+- Identical files can be stored once and shared (Nuxt's `index.html` and `404.html`,
+  for example). Repack tells you when that happens. Make the same edit to all of
+  them, or to none.
+- Code signatures no longer match. On macOS, put the binary back in its `.app` and
+  re-sign it: `codesign --force --deep --preserve-metadata=entitlements -s - MyApp.app`.
+  On Windows, a signed app loses its valid signature and may get a SmartScreen warning.
+- If the app sets a CSP, Tauri allows its inline `<script>` blocks by their build-time
+  hash, so an edited inline script gets blocked. Edits to `.js` files are fine.
+
 ## Tested on
 
 Every file, under its real name, compared byte for byte against the app's own table:
