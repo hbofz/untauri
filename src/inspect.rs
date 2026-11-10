@@ -236,40 +236,42 @@ pub fn run(loaded: &Loaded, json: bool, lock: Option<&Path>) -> ExitCode {
             if report.git.is_empty() { String::new() } else { format!(", and git-built deps ({}) are left out", report.git.keys().cloned().collect::<Vec<_>>().join(", ")) });
     }
 
-    let text = if json { serde_json::to_string_pretty(&report).unwrap() + "\n" } else { render(&report) };
+    let text = if json { serde_json::to_string_pretty(&report).unwrap() + "\n" } else { render(&report, crate::color_out()) };
     // Ignore a closed pipe (`untauri inspect app | head`) instead of panicking.
     use std::io::Write;
     let _ = std::io::stdout().write_all(text.as_bytes());
     ExitCode::SUCCESS
 }
 
-fn render(r: &Report) -> String {
+fn render(r: &Report, on: bool) -> String {
+    use crate::style;
     use std::fmt::Write;
     let mut o = String::new();
-    let list = |v: &[Crate], strip: &str| v.iter().map(|c| format!("{} {}", c.name.trim_start_matches(strip), c.version)).collect::<Vec<_>>().join(", ");
-    let _ = writeln!(o, "binary    {}", r.binary);
-    let _ = writeln!(o, "tauri     {}", r.tauri.as_deref().unwrap_or("not found"));
-    if !r.runtime.is_empty() { let _ = writeln!(o, "runtime   {}", list(&r.runtime, "")); }
+    let row = |o: &mut String, name: &str, val: String| { let _ = writeln!(o, "{} {val}", style(&format!("{name:<9}"), "1;34", on)); };
+    let list = |v: &[Crate], strip: &str| v.iter().map(|c| format!("{} {}", c.name.trim_start_matches(strip), style(&c.version, "32", on))).collect::<Vec<_>>().join(", ");
+    row(&mut o, "binary", r.binary.clone());
+    row(&mut o, "tauri", r.tauri.as_deref().map_or("not found".into(), |v| style(v, "1;32", on)));
+    if !r.runtime.is_empty() { row(&mut o, "runtime", list(&r.runtime, "")); }
     let no_plugins = if r.git.is_empty() { "none found" } else { "none with a version (see git deps)" };
-    let _ = writeln!(o, "plugins   {}", if r.plugins.is_empty() { no_plugins.to_string() } else { list(&r.plugins, "tauri-plugin-") });
-    let _ = writeln!(o, "crates    {} found with versions, a lower bound (--lockfile to audit them)", r.crates.len());
+    row(&mut o, "plugins", if r.plugins.is_empty() { no_plugins.to_string() } else { list(&r.plugins, "tauri-plugin-") });
+    row(&mut o, "crates", format!("{} found with versions, a lower bound (--lockfile to audit them)", r.crates.len()));
     let f = &r.frontend;
-    let _ = writeln!(o, "frontend  {} files, {} KB, {}{}", f.files, f.bytes / 1024,
+    row(&mut o, "frontend", format!("{} files, {} KB, {}{}", f.files, f.bytes / 1024,
         if !f.from_table { "found by scanning (best-effort)" } else if f.compressed { "brotli" } else { "uncompressed" },
-        if f.source_maps > 0 { format!(", {} source maps with {} original files (extract with --sources)", f.source_maps, f.original_sources) } else { String::new() });
+        if f.source_maps > 0 { format!(", {} source maps with {} original files (extract with --sources)", f.source_maps, f.original_sources) } else { String::new() }));
     if !r.git.is_empty() {
         let g: Vec<String> = r.git.iter().map(|(repo, c)| format!("{repo} @ {}", c.iter().cloned().collect::<Vec<_>>().join(", "))).collect();
-        let _ = writeln!(o, "git deps  {}", g.join(", "));
+        row(&mut o, "git deps", g.join(", "));
     }
     let n: usize = r.plugin_commands.values().map(|s| s.len()).sum();
     let _ = writeln!(o);
-    let _ = writeln!(o, "IPC referenced by the frontend: {} plugin commands, {} literal invoke() calls.", n, r.app_commands.len());
-    let _ = writeln!(o, "Both are lower bounds, and referenced is not granted: the app's capabilities decide what runs.");
+    let _ = writeln!(o, "{} {} plugin commands, {} literal invoke() calls.", style("IPC referenced by the frontend:", "1", on), n, r.app_commands.len());
+    let _ = writeln!(o, "{}", style("Both are lower bounds, and referenced is not granted: the app's capabilities decide what runs.", "2", on));
     for (p, cmds) in &r.plugin_commands {
-        let _ = writeln!(o, "  {p}: {}", cmds.iter().cloned().collect::<Vec<_>>().join(", "));
+        let _ = writeln!(o, "  {} {}", style(&format!("{p}:"), "1;35", on), cmds.iter().cloned().collect::<Vec<_>>().join(", "));
     }
     if !r.app_commands.is_empty() {
-        let _ = writeln!(o, "  invoke(): {}", r.app_commands.iter().cloned().collect::<Vec<_>>().join(", "));
+        let _ = writeln!(o, "  {} {}", style("invoke():", "1;35", on), r.app_commands.iter().cloned().collect::<Vec<_>>().join(", "));
     }
     o
 }

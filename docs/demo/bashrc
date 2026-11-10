@@ -1,1 +1,3 @@
 PS1='\[\e[1;34m\]$\[\e[0m\] '
+# The demo pipes list/inspect into head; keep their color through the pipe.
+export CLICOLOR_FORCE=1

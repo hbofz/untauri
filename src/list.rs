@@ -29,7 +29,7 @@ fn human(n: usize) -> String {
     }
 }
 
-fn render(node: &Node, prefix: &str, out: &mut String) {
+fn render(node: &Node, prefix: &str, out: &mut String, on: bool) {
     let last = node.children.len().saturating_sub(1);
     for (i, (name, child)) in node.children.iter().enumerate() {
         let (branch, indent) = if i == last { ("└── ", "    ") } else { ("├── ", "│   ") };
@@ -39,12 +39,14 @@ fn render(node: &Node, prefix: &str, out: &mut String) {
             Some((s, None)) => format!(" ({} stored, does not decode)", human(s)),
             None => String::new(),
         };
-        out.push_str(&format!("{prefix}{branch}{name}{size}\n"));
-        render(child, &format!("{prefix}{indent}"), out);
+        // A folder (no file of its own) reads like `tree`/`ls`: bold blue.
+        let shown = if child.item.is_none() { crate::style(name, "1;34", on) } else { name.clone() };
+        out.push_str(&format!("{prefix}{branch}{shown}{}\n", crate::style(&size, "2", on)));
+        render(child, &format!("{prefix}{indent}"), out, on);
     }
 }
 
-fn tree(items: &[Item]) -> String {
+fn tree(items: &[Item], on: bool) -> String {
     let mut root = Node::default();
     for it in items {
         let mut node = &mut root;
@@ -54,7 +56,7 @@ fn tree(items: &[Item]) -> String {
         node.item = Some((it.stored_len, it.decompressed_len));
     }
     let mut out = String::new();
-    render(&root, "", &mut out);
+    render(&root, "", &mut out, on);
     out
 }
 
@@ -77,7 +79,8 @@ pub fn run(loaded: &Loaded, json: bool) -> ExitCode {
         let stored: usize = spans.values().sum();
         let full: usize = items.iter().filter_map(|i| i.decompressed_len).sum();
         let how = if t.compressed { format!("{} brotli, {} decompressed", human(stored), human(full)) } else { format!("{} stored, uncompressed", human(stored)) };
-        format!("{} assets ({how})\n{}", items.len(), tree(&items))
+        let on = crate::color_out();
+        format!("{} ({how})\n{}", crate::style(&format!("{} assets", items.len()), "1", on), tree(&items, on))
     };
     // Ignore a closed pipe (`untauri list app | head`) instead of panicking.
     use std::io::Write;
@@ -94,7 +97,7 @@ mod tests {
     #[test]
     fn renders_nested_paths_as_a_tree() {
         let it = |p: &str, s, d| Item { path: p.into(), offset: 0, stored_len: s, decompressed_len: d };
-        let out = tree(&[it("/assets/a.js", 10, Some(40)), it("/assets/b.css", 5, None), it("/index.html", 7, Some(7))]);
+        let out = tree(&[it("/assets/a.js", 10, Some(40)), it("/assets/b.css", 5, None), it("/index.html", 7, Some(7))], false);
         assert_eq!(out, "├── assets\n│   ├── a.js (40 B, 10 B stored)\n│   └── b.css (5 B stored, does not decode)\n└── index.html (7 B)\n");
     }
 }

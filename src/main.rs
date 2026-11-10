@@ -96,20 +96,41 @@ enum Cmd {
     },
 }
 
-// Color only for a terminal, and never when NO_COLOR is set (no-color.org).
+// Color for a terminal, never with NO_COLOR (no-color.org), and also through a pipe
+// with CLICOLOR_FORCE (bixense.com/clicolors), so `untauri list app | less -R` keeps it.
+fn wants_color(tty: bool) -> bool {
+    let env = |k| std::env::var_os(k).filter(|v| !v.is_empty());
+    env("NO_COLOR").is_none() && (tty || env("CLICOLOR_FORCE").is_some_and(|v| v != "0"))
+}
+
+// For stderr status lines.
 fn color() -> bool {
     use std::io::IsTerminal;
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()))
+    *ON.get_or_init(|| wants_color(std::io::stderr().is_terminal()))
 }
 
+// For reports on stdout (`list`, `inspect`).
+pub fn color_out() -> bool {
+    use std::io::IsTerminal;
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| wants_color(std::io::stdout().is_terminal()))
+}
+
+pub fn style(s: &str, code: &str, on: bool) -> String {
+    if on && !s.is_empty() { format!("\x1b[{code}m{s}\x1b[0m") } else { s.to_string() }
+}
+
+// A known leading label gets a bold color. Outcomes (success, warning, error) carry the
+// color through the whole message; a note only marks its label.
 fn paint(line: &str, color: bool) -> String {
-    const LABELS: [(&str, &str); 8] = [
-        ("error", "1;31"), ("warning", "1;33"), ("note", "1;36"),
-        ("complete", "1;32"), ("references", "1;32"), ("sources", "1;32"), ("patched", "1;32"), ("dry run", "1;32"),
+    const LABELS: [(&str, &str, bool); 8] = [
+        ("error", "31", true), ("warning", "33", true), ("note", "36", false),
+        ("complete", "32", true), ("references", "32", true), ("sources", "32", true), ("patched", "32", true), ("dry run", "32", true),
     ];
-    match LABELS.iter().find(|(l, _)| color && line.starts_with(l)) {
-        Some((l, code)) => format!("\x1b[{code}m{l}\x1b[0m{}", &line[l.len()..]),
+    match LABELS.iter().find(|(l, ..)| color && line.starts_with(l)) {
+        Some((l, c, true)) => format!("\x1b[1;{c}m{l}\x1b[0;{c}m{}\x1b[0m", &line[l.len()..]),
+        Some((l, c, false)) => format!("\x1b[1;{c}m{l}\x1b[0m{}", &line[l.len()..]),
         None => line.to_string(),
     }
 }
@@ -319,11 +340,12 @@ mod tests {
     }
 
     // Mutation check: drop the `color` guard and the plain case gets escape codes; break
-    // the slice and the rest of the line is lost.
+    // the slice and the rest of the line is lost; NO_COLOR must beat a terminal.
     #[test]
-    fn paint_colors_only_the_label() {
-        assert_eq!(paint("error: nope", true), "\x1b[1;31merror\x1b[0m: nope");
-        assert_eq!(paint("patched 1 asset(s)", true), "\x1b[1;32mpatched\x1b[0m 1 asset(s)");
+    fn paint_colors_by_label() {
+        assert_eq!(paint("error: nope", true), "\x1b[1;31merror\x1b[0;31m: nope\x1b[0m");
+        assert_eq!(paint("patched 1 asset(s)", true), "\x1b[1;32mpatched\x1b[0;32m 1 asset(s)\x1b[0m");
+        assert_eq!(paint("note: x", true), "\x1b[1;36mnote\x1b[0m: x");
         assert_eq!(paint("error: nope", false), "error: nope");
         assert_eq!(paint("recovered 61 assets", true), "recovered 61 assets");
     }
