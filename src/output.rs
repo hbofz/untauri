@@ -1,11 +1,15 @@
 use crate::classify::Kind;
 use crate::scan::Asset;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Serialize, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct Entry {
     pub name: String,
+    // The app's own key for this asset (`/assets/main-A1b2C3d4.js`), so `repack` can map
+    // a written file back to its table entry in either output layout.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub key: Option<String>,
     // Original hashed filename recovered from the app's asset-key strings, when the
     // stream was decoded off one. None when named by the fallback `<ext>/NNN.ext` scheme.
     pub original_name: Option<String>,
@@ -13,11 +17,21 @@ pub struct Entry {
     pub offset: usize,
     pub compressed_len: usize,
     pub decompressed_len: usize,
+    // FNV-1a of the extracted bytes, so `repack` can tell the directory came from this
+    // exact build: editing a file does not change what was recorded here.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub hash: Option<String>,
     // Set when this row's bytes are a copy of an earlier asset (a Vite content-hash twin
     // whose own stream did not decode). The two rows share `offset`, so without this the
     // manifest looks like two distinct extractions at one offset. Names the source.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alias_of: Option<String>,
+}
+
+// Stable across platforms and versions (unlike std's hasher), and a collision only
+// matters if a different build happens to produce one, so no crypto is needed.
+pub fn content_hash(bytes: &[u8]) -> String {
+    format!("{:016x}", bytes.iter().fold(0xcbf29ce484222325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3)))
 }
 
 // A full HTML document, not a fragment: starts (after whitespace) with `<!doctype` or
@@ -131,12 +145,14 @@ pub fn write(out_dir: &Path, items: &[(Asset, Kind)], manifest_only: bool, tree:
         }
         entries.push(Entry {
             name,
+            key: asset.path.clone(),
             // Report the name we actually trusted, not a rejected unsafe one.
             original_name: safe_orig.map(|s| s.to_string()),
             kind: ext.to_string(),
             offset: asset.offset,
             compressed_len: asset.compressed_len,
             decompressed_len: asset.bytes.len(),
+            hash: Some(content_hash(&asset.bytes)),
             alias_of,
         });
     }
@@ -189,6 +205,14 @@ mod tests {
         assert_eq!(entries[0].alias_of, None, "the first row at an offset is the real extraction");
         assert_eq!(entries[1].alias_of.as_deref(), Some("css/real-M3n4O5p6.css"), "the second names its source");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Published FNV-1a 64 vectors: a manifest written on one platform must check out on
+    // every other, so the hash can never change.
+    #[test]
+    fn content_hash_is_fnv1a_64() {
+        assert_eq!(content_hash(b""), "cbf29ce484222325");
+        assert_eq!(content_hash(b"a"), "af63dc4c8601ec8c");
     }
 
     #[test]

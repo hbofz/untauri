@@ -13,16 +13,26 @@ pub fn load(path: &Path) -> std::io::Result<Loaded> {
 // A universal (fat) Mach-O holds one full binary per architecture, each with the same
 // embedded frontend. Work on the first slice: its pointers are relative to the slice.
 fn thin(data: Vec<u8>) -> Vec<u8> {
-    use object::read::macho::{FatArch, MachOFatFile32, MachOFatFile64};
-    let range = match object::FileKind::parse(&*data) {
-        Ok(object::FileKind::MachOFat32) => MachOFatFile32::parse(&*data).ok().and_then(|f| f.arches().first().map(|a| a.file_range())),
-        Ok(object::FileKind::MachOFat64) => MachOFatFile64::parse(&*data).ok().and_then(|f| f.arches().first().map(|a| a.file_range())),
-        _ => None,
-    };
-    match range.and_then(|(o, s)| data.get(o as usize..(o + s) as usize)) {
-        Some(slice) => slice.to_vec(),
-        None => data,
+    match slices(&data).into_iter().next() {
+        Some(r) if r != (0..data.len()) => data[r].to_vec(),
+        _ => data,
     }
+}
+
+// The byte range of each architecture's binary: every slice of a universal Mach-O,
+// else the whole file.
+pub fn slices(data: &[u8]) -> Vec<Range<usize>> {
+    use object::read::macho::{FatArch, MachOFatFile32, MachOFatFile64};
+    let ranges: Vec<(u64, u64)> = match object::FileKind::parse(data) {
+        Ok(object::FileKind::MachOFat32) => MachOFatFile32::parse(data).map(|f| f.arches().iter().map(|a| a.file_range()).collect()).unwrap_or_default(),
+        Ok(object::FileKind::MachOFat64) => MachOFatFile64::parse(data).map(|f| f.arches().iter().map(|a| a.file_range()).collect()).unwrap_or_default(),
+        _ => vec![],
+    };
+    let ranges: Vec<Range<usize>> = ranges.into_iter()
+        .map(|(o, s)| o as usize..(o + s) as usize)
+        .filter(|r| r.end <= data.len())
+        .collect();
+    if ranges.is_empty() { std::iter::once(0..data.len()).collect() } else { ranges }
 }
 
 // The executable a .app bundle names in Info.plist (`CFBundleExecutable`). Contents/MacOS
@@ -37,7 +47,7 @@ fn bundle_executable(app: &Path) -> Option<PathBuf> {
 }
 
 // Resolve a .app bundle to its main Mach-O, else the path itself.
-fn resolve_binary(path: &Path) -> PathBuf {
+pub fn resolve_binary(path: &Path) -> PathBuf {
     if path.extension().and_then(|e| e.to_str()) == Some("app") {
         if let Some(p) = bundle_executable(path) { return p; }
         let macos = path.join("Contents/MacOS");

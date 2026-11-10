@@ -6,6 +6,7 @@ mod check;
 mod classify;
 mod inspect;
 mod output;
+mod repack;
 mod scan;
 mod sources;
 mod table;
@@ -61,6 +62,20 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         lockfile: Option<PathBuf>,
     },
+    /// Write edited files from an extracted directory back into the app binary
+    ///
+    /// Extract with untauri, edit files in the output directory, then repack. Each file
+    /// is patched in place, so an edited file must still fit in the space its original
+    /// took (brotli-compressed when the app was built that way).
+    Repack {
+        /// Path to the original .app bundle or raw executable
+        path: PathBuf,
+        /// The directory untauri extracted to (holds assets.json)
+        dir: PathBuf,
+        /// Where to write the patched executable
+        #[arg(short, long)]
+        out: PathBuf,
+    },
 }
 
 pub struct Recovered {
@@ -103,6 +118,9 @@ fn main() -> ExitCode {
     if let Some(Cmd::Inspect { path, json, lockfile }) = &cli.cmd {
         let Some(loaded) = load(path) else { return ExitCode::from(1) };
         return inspect::run(&loaded, *json, lockfile.as_deref());
+    }
+    if let Some(Cmd::Repack { path, dir, out }) = &cli.cmd {
+        return repack::run(path, dir, out);
     }
     let Some(path) = cli.path.as_deref() else { return ExitCode::from(2) }; // clap enforces it
     let Some(loaded) = load(path) else { return ExitCode::from(1) };
@@ -184,18 +202,23 @@ fn hash_aliases(undecoded: &[String], items: &[(scan::Asset, Kind)]) -> Vec<(sca
         let Some(key) = hash_key(name) else { continue };
         let Some((src, kind)) = items.iter().find(|(a, _)| a.name.as_deref().and_then(hash_key) == Some(key.clone())) else { continue };
         eprintln!("note: {name} did not decode; emitting a copy of {} (same content hash)", src.name.as_deref().unwrap_or("?"));
+        // From the asset table, `name` is already the full key (`/assets/x-HASH.js`).
+        // From the scanner it is a bare filename: put it in the twin's directory, so
+        // `--tree` places the copy where the bundle expects to find it.
+        let (base, path) = match name.rsplit_once('/') {
+            Some((_, base)) if name.starts_with('/') => (base.to_string(), Some(name.clone())),
+            _ => (name.clone(), src.path.as_deref().map(|p| match p.rsplit_once('/') {
+                Some((dir, _)) => format!("{dir}/{name}"),
+                None => name.clone(),
+            })),
+        };
         out.push((
-            // Same directory as the twin, under the failing record's own name, so `--tree`
-            // places the copy where the bundle expects to find it.
             scan::Asset {
                 offset: src.offset,
                 compressed_len: src.compressed_len,
                 bytes: src.bytes.clone(),
-                name: Some(name.clone()),
-                path: src.path.as_deref().map(|p| match p.rsplit_once('/') {
-                    Some((dir, _)) => format!("{dir}/{name}"),
-                    None => name.clone(),
-                }),
+                name: Some(base),
+                path,
             },
             *kind,
         ));
@@ -236,6 +259,17 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0.name.as_deref(), Some("classDiagram-v2-Q7r8S9t0-M3n4O5p6.js"));
         assert_eq!(out[0].0.bytes, items[0].0.bytes);
+    }
+
+    // The asset table reports full keys. Mutation check: join the key onto the twin's
+    // directory again and the path comes back as `/assets//assets/...`.
+    #[test]
+    fn table_key_alias_keeps_its_own_key() {
+        let mut twin = asset("classDiagram-U1v2W3x4-M3n4O5p6.js");
+        twin.0.path = Some("/assets/classDiagram-U1v2W3x4-M3n4O5p6.js".into());
+        let out = hash_aliases(&["/assets/classDiagram-v2-Q7r8S9t0-M3n4O5p6.js".to_string()], &[twin]);
+        assert_eq!(out[0].0.path.as_deref(), Some("/assets/classDiagram-v2-Q7r8S9t0-M3n4O5p6.js"));
+        assert_eq!(out[0].0.name.as_deref(), Some("classDiagram-v2-Q7r8S9t0-M3n4O5p6.js"));
     }
 
     #[test]

@@ -118,7 +118,7 @@ mod tests {
         (Asset { offset: 0, compressed_len: 1, bytes: bytes.to_vec(), name: None, path: None }, kind)
     }
     fn entry(name: &str) -> Entry {
-        Entry { name: name.into(), original_name: None, kind: "js".into(), offset: 0, compressed_len: 1, decompressed_len: 1, alias_of: None }
+        Entry { name: name.into(), key: None, original_name: None, kind: "js".into(), offset: 0, compressed_len: 1, decompressed_len: 1, hash: None, alias_of: None }
     }
 
     // Root-absolute references were invisible to the scan, so a bundle whose index.html

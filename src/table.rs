@@ -28,6 +28,8 @@ pub struct Table {
     // Keys whose stream claimed to be brotli but would not decode.
     pub undecoded: Vec<String>,
     pub compressed: bool,
+    // Asset key -> file offset of its entry in the `entries` array, for `patch`.
+    pub slots: HashMap<String, usize>,
 }
 
 struct Image<'a> {
@@ -123,14 +125,14 @@ fn candidate_slots(data: &[u8], img: &Image) -> Vec<usize> {
 }
 
 // Runs of back-to-back entries: each is one `entries` array.
-fn runs(img: &Image, slots: &[usize]) -> Vec<Vec<(String, usize, usize)>> {
+fn runs(img: &Image, slots: &[usize]) -> Vec<Vec<(String, usize, usize, usize)>> {
     let mut covered = std::collections::HashSet::new();
     let mut out = Vec::new();
     for &s in slots {
         if covered.contains(&s) { continue; }
         let mut run = Vec::new();
         let mut o = s;
-        while let Some(e) = img.entry(o) { covered.insert(o); run.push(e); o += ENTRY; }
+        while let Some((k, d, l)) = img.entry(o) { covered.insert(o); run.push((k, d, l, o)); o += ENTRY; }
         if !run.is_empty() { out.push(run); }
     }
     out
@@ -150,7 +152,7 @@ fn from_image(data: &[u8], img: &Image) -> Option<Table> {
     // built without compression), the largest run that holds web files.
     // Decode each run once; the run with the most streams that decode is the table.
     let decoded: Vec<Vec<Option<Vec<u8>>>> = runs.iter()
-        .map(|r| r.iter().map(|(_, o, l)| decode_exact(data, *o, *l)).collect())
+        .map(|r| r.iter().map(|(_, o, l, _)| decode_exact(data, *o, *l)).collect())
         .collect();
     let best = (0..runs.len())
         .map(|i| (decoded[i].iter().filter(|d| d.is_some()).count(), runs[i].len(), i))
@@ -158,12 +160,13 @@ fn from_image(data: &[u8], img: &Image) -> Option<Table> {
         .max();
     let (compressed, i) = match best {
         Some((_, _, i)) => (true, i),
-        None => (false, (0..runs.len()).filter(|&i| runs[i].iter().any(|(k, _, _)| web_key(k))).max_by_key(|&i| runs[i].len())?),
+        None => (false, (0..runs.len()).filter(|&i| runs[i].iter().any(|(k, ..)| web_key(k))).max_by_key(|&i| runs[i].len())?),
     };
 
     let mut assets = Vec::new();
     let mut undecoded = Vec::new();
-    for ((key, off, len), dec) in runs[i].iter().zip(&decoded[i]) {
+    let slots = runs[i].iter().map(|(k, _, _, s)| (k.clone(), *s)).collect();
+    for ((key, off, len, _), dec) in runs[i].iter().zip(&decoded[i]) {
         let bytes = match (compressed, dec) {
             (true, Some(b)) => b.clone(),
             (true, None) => { undecoded.push(key.clone()); continue; }
@@ -172,7 +175,21 @@ fn from_image(data: &[u8], img: &Image) -> Option<Table> {
         let name = key.rsplit('/').next().filter(|n| !n.is_empty()).map(str::to_string);
         assets.push(Asset { offset: *off, compressed_len: *len, bytes, name, path: Some(key.clone()) });
     }
-    Some(Table { assets, undecoded, compressed })
+    Some(Table { assets, undecoded, compressed, slots })
+}
+
+// Replace an asset's stored bytes in place: write `stored` over its old bytes, zero the
+// rest of the old span, and set data_len in every entry in `slots` (the linker stores
+// identical files once, so several keys can share one span). Only the length changes in
+// an entry; both pointers stay valid, so no relocation or fixup needs touching. Lengths are
+// plain integers in every format. Err(bytes over) when `stored` is larger than the span.
+pub fn patch(data: &mut [u8], asset: &Asset, slots: &[usize], stored: &[u8]) -> Result<(), usize> {
+    if stored.len() > asset.compressed_len { return Err(stored.len() - asset.compressed_len); }
+    let span = &mut data[asset.offset..asset.offset + asset.compressed_len];
+    span[..stored.len()].copy_from_slice(stored);
+    span[stored.len()..].fill(0);
+    for s in slots { data[s + 24..s + 32].copy_from_slice(&(stored.len() as u64).to_le_bytes()); }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -234,6 +251,25 @@ mod tests {
         assert_eq!(t.assets[1].bytes, b"console.log('a')");
         assert_eq!(t.assets[2].bytes.len(), 9 << 20);
         assert_eq!(t.assets[2].name.as_deref(), Some("big video.webm"));
+    }
+
+    // Mutation check: skip the data_len write and the shorter stream fails to decode
+    // exactly; drop the size guard and the oversized patch tramples the next asset.
+    #[test]
+    fn patch_rewrites_one_asset_in_place() {
+        let files = vec![
+            ("/index.html", br(b"<!doctype html><title>old title, quite long</title>")),
+            ("/assets/a.js", br(b"console.log('untouched')")),
+        ];
+        let mut data = elf(&files, b"");
+        let t = read_obj(&data).unwrap();
+        let new = br(b"<!doctype html><title>new</title>");
+        patch(&mut data, &t.assets[0], &[t.slots["/index.html"]], &new).unwrap();
+        let t2 = read_obj(&data).unwrap();
+        assert_eq!(t2.assets[0].bytes, b"<!doctype html><title>new</title>");
+        assert_eq!(t2.assets[1].bytes, b"console.log('untouched')");
+        let big = vec![b'x'; t.assets[0].compressed_len + 3];
+        assert_eq!(patch(&mut data, &t2.assets[0], &[t2.slots["/index.html"]], &big), Err(big.len() - t2.assets[0].compressed_len));
     }
 
     // One entry at offset 0 naming `key`, pointing its data at 4 bytes past the key.
