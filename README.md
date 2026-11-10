@@ -5,7 +5,7 @@
 
 Extract, inspect and patch the web frontend inside compiled Tauri apps.
 
-![untauri extracting Jan's frontend, then inspecting Yaak](docs/demo.gif)
+![untauri listing, extracting, inspecting and repacking Kanri](docs/demo.gif)
 
 A Tauri app doesn't ship its frontend as loose files. Every HTML, JS, CSS, font and
 image file is compressed and compiled into the executable, indexed by a table of
