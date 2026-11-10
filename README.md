@@ -2,7 +2,7 @@
 
 Get the web frontend (HTML, CSS, JS, fonts, images) back out of a compiled Tauri app.
 
-![untauri extracting Jan's 559 frontend files](docs/demo.gif)
+![untauri extracting Jan's frontend, then inspecting Yaak](docs/demo.gif)
 
 Tauri doesn't ship your frontend as loose files. It compresses every file and bakes
 it into the executable, with a lookup table of names. untauri reads that table and
@@ -128,20 +128,6 @@ Every file, under its real name, compared byte for byte against the app's own ta
 | Pake (ChatGPT) | Linux | 1 |
 
 Each one takes under a second.
-
-## How it works
-
-Tauri's build step turns your `dist/` folder into a `phf::Map<&str, &[u8]>`: an array
-of `(path, bytes)` pairs compiled into the binary. untauri finds that array by its shape
-(a run of 32-byte entries, each holding a pointer to a `/path` string and a pointer to
-its data), resolves the pointers for the binary's format (ELF relocations, Mach-O
-chained fixups, plain PE addresses) and decompresses each entry. Apps built without
-Tauri's `compression` feature (Jan, for one) store files uncompressed, and those are
-read directly.
-
-If no table is found, untauri falls back to scanning the binary for brotli streams. That
-mode is a best guess: it can miss files, lose names, and pick up noise, and it says so
-when it runs.
 
 ## Limits
 
