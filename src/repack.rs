@@ -25,7 +25,8 @@ fn brotli(bytes: &[u8]) -> Vec<u8> {
     }).min_by_key(Vec::len).unwrap()
 }
 
-pub fn run(path: &Path, dir: &Path, out: &Path) -> ExitCode {
+// `out` None is a dry run: everything up to and including the read-back, then stop.
+pub fn run(path: &Path, dir: &Path, out: Option<&Path>) -> ExitCode {
     let bin = target::resolve_binary(path);
     let mut data = match std::fs::read(&bin) {
         Ok(d) => d,
@@ -143,6 +144,11 @@ pub fn run(path: &Path, dir: &Path, out: &Path) -> ExitCode {
         }
     }
 
+    let Some(out) = out else {
+        eprintln!("dry run: {} asset(s) would be patched, and the result checks out. Nothing written.", changed.len());
+        for k in changed.keys() { eprintln!("  {k}"); }
+        return ExitCode::SUCCESS;
+    };
     if let Err(e) = std::fs::write(out, &data) { eprintln!("error: cannot write {}: {e}", out.display()); return ExitCode::from(1); }
     if let Ok(m) = std::fs::metadata(&bin) { let _ = std::fs::set_permissions(out, m.permissions()); }
     eprintln!("patched {} asset(s) -> {}", changed.len(), out.display());
