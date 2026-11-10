@@ -7,6 +7,7 @@ mod classify;
 mod inspect;
 mod output;
 mod scan;
+mod sources;
 mod table;
 mod target;
 
@@ -41,6 +42,10 @@ struct Cli {
     /// Exit non-zero if any file failed to extract
     #[arg(long)]
     strict: bool,
+    /// Also rebuild the original source files from any source maps the app ships,
+    /// into <OUT>/sources/
+    #[arg(long)]
+    sources: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -129,7 +134,22 @@ fn main() -> ExitCode {
         Err(e) => { eprintln!("error writing output: {e}"); return ExitCode::from(1); }
     };
     eprintln!("recovered {} assets -> {}", entries.len(), cli.out.display());
-
+    if cli.sources && cli.manifest_only {
+        eprintln!("note: --sources does nothing with --manifest-only");
+    } else if cli.sources {
+        // In --tree mode an extracted asset can itself live under sources/; never overwrite it.
+        let reserved = entries.iter().filter_map(|e| e.name.strip_prefix("sources/")).map(sources::key).collect();
+        let st = sources::write(&cli.out, sources::plan(items.iter().map(|(a, _)| a), &reserved));
+        if st.maps == 0 {
+            eprintln!("sources: the app ships no source maps, so there is no original source to rebuild.");
+        } else {
+            eprintln!("sources: rebuilt {} original files from {} source maps -> {} ({} from node_modules)",
+                st.written, st.maps, cli.out.join("sources").display(), st.node_modules);
+            if st.unusable > 0 { eprintln!("  {} source maps could not be read (invalid JSON, or an index map with `sections`)", st.unusable); }
+            if st.no_content > 0 { eprintln!("  {} files are listed in the maps without their text, so they could not be rebuilt", st.no_content); }
+            if st.skipped > 0 { eprintln!("  {} files skipped (unusable path or write error)", st.skipped); }
+        }
+    }
     if from_table {
         if undecoded.is_empty() {
             eprintln!("complete: all {table_len} entries in the app's asset table were extracted.");
