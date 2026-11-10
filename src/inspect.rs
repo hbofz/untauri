@@ -222,17 +222,17 @@ pub fn run(loaded: &Loaded, json: bool, lock: Option<&Path>) -> ExitCode {
     // An asset table alone is not proof (other Rust binaries hold similar arrays); a
     // Tauri app always links tauri, its runtime or its plugins.
     if report.tauri.is_none() && report.runtime.is_empty() && report.plugins.is_empty() {
-        eprintln!("no tauri, wry, tao or tauri-plugin crates found: this does not look like a Tauri app.");
+        say!("no tauri, wry, tao or tauri-plugin crates found: this does not look like a Tauri app.");
         return ExitCode::from(2);
     }
 
     if let Some(p) = lock {
         if let Err(e) = std::fs::write(p, lockfile(&report.crates)) {
-            eprintln!("error writing {}: {e}", p.display());
+            say!("error writing {}: {e}", p.display());
             return ExitCode::from(1);
         }
-        eprintln!("wrote {} crates to {} (audit with: cargo audit -f {})", report.crates.len(), p.display(), p.display());
-        eprintln!("note: this is a lower bound (only crates with panic paths in the binary){}; a clean audit does not prove the app is clean.",
+        say!("wrote {} crates to {} (audit with: cargo audit -f {})", report.crates.len(), p.display(), p.display());
+        say!("note: this is a lower bound (only crates with panic paths in the binary){}; a clean audit does not prove the app is clean.",
             if report.git.is_empty() { String::new() } else { format!(", and git-built deps ({}) are left out", report.git.keys().cloned().collect::<Vec<_>>().join(", ")) });
     }
 

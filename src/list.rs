@@ -60,7 +60,7 @@ fn tree(items: &[Item]) -> String {
 
 pub fn run(loaded: &Loaded, json: bool) -> ExitCode {
     let Some(t) = crate::table::read(&loaded.data) else {
-        eprintln!("no Tauri asset table found, so there are no asset paths to list. `untauri <app>` can still scan for the files.");
+        say!("no Tauri asset table found, so there are no asset paths to list. `untauri <app>` can still scan for the files.");
         return ExitCode::from(2);
     };
     let mut items: Vec<Item> = t.assets.iter()

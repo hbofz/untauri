@@ -30,15 +30,15 @@ pub fn run(path: &Path, dir: &Path, out: Option<&Path>) -> ExitCode {
     let bin = target::resolve_binary(path);
     let mut data = match std::fs::read(&bin) {
         Ok(d) => d,
-        Err(e) => { eprintln!("error: cannot read {}: {e}", bin.display()); return ExitCode::from(1); }
+        Err(e) => { say!("error: cannot read {}: {e}", bin.display()); return ExitCode::from(1); }
     };
     let manifest: Vec<Entry> = match std::fs::read_to_string(dir.join("assets.json")).map_err(|e| e.to_string())
         .and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string())) {
         Ok(m) => m,
-        Err(e) => { eprintln!("error: cannot read {}: {e}", dir.join("assets.json").display()); return ExitCode::from(1); }
+        Err(e) => { say!("error: cannot read {}: {e}", dir.join("assets.json").display()); return ExitCode::from(1); }
     };
     if !manifest.is_empty() && manifest.iter().all(|e| e.key.is_none() || e.hash.is_none()) {
-        eprintln!("error: {} was written by an older untauri, which did not record what repack needs. Extract again with this version, then edit that output.", dir.join("assets.json").display());
+        say!("error: {} was written by an older untauri, which did not record what repack needs. Extract again with this version, then edit that output.", dir.join("assets.json").display());
         return ExitCode::from(1);
     }
     // Alias rows count too: in table mode they are keys whose identical bytes the linker
@@ -52,7 +52,7 @@ pub fn run(path: &Path, dir: &Path, out: Option<&Path>) -> ExitCode {
         if let Some(h) = e.hash.as_deref() { recorded.insert(key, h); }
         match std::fs::read(dir.join(&e.name)) {
             Ok(b) => { files.insert(key, b); }
-            Err(err) => eprintln!("warning: skipping {} ({err})", e.name),
+            Err(err) => say!("warning: skipping {} ({err})", e.name),
         }
     }
 
@@ -64,7 +64,7 @@ pub fn run(path: &Path, dir: &Path, out: Option<&Path>) -> ExitCode {
     for (i, r) in slices.iter().enumerate() {
         let slice = &mut data[r.clone()];
         let Some(t) = table::read(slice) else {
-            eprintln!("error: no Tauri asset table in {}; repack needs one", bin.display());
+            say!("error: no Tauri asset table in {}; repack needs one", bin.display());
             return ExitCode::from(1);
         };
         for a in &t.assets {
@@ -76,9 +76,9 @@ pub fn run(path: &Path, dir: &Path, out: Option<&Path>) -> ExitCode {
         // A universal binary repeats the same table per slice; say each thing once.
         for key in files.keys().filter(|_| i == 0) {
             if t.undecoded.iter().any(|u| u == key) {
-                eprintln!("warning: {key} is stored in a form that does not decode, so it cannot be repacked; skipped");
+                say!("warning: {key} is stored in a form that does not decode, so it cannot be repacked; skipped");
             } else if !t.slots.contains_key(*key) {
-                eprintln!("warning: {key} is not in the app's asset table; skipped");
+                say!("warning: {key} is not in the app's asset table; skipped");
             }
         }
         // Patching a span changes every key stored in it, so they must all end up equal.
@@ -110,23 +110,23 @@ pub fn run(path: &Path, dir: &Path, out: Option<&Path>) -> ExitCode {
     }
     if !mismatched.is_empty() {
         mismatched.sort();
-        eprintln!("error: {} was extracted from a different build of this app ({} file(s) differ from what it holds, e.g. {}). Nothing written.",
+        say!("error: {} was extracted from a different build of this app ({} file(s) differ from what it holds, e.g. {}). Nothing written.",
             dir.display(), mismatched.len(), mismatched[0]);
-        eprintln!("Extract this binary again and redo the edits in that output.");
+        say!("Extract this binary again and redo the edits in that output.");
         return ExitCode::from(1);
     }
     if !errors.is_empty() {
         errors.sort();
         errors.dedup();
-        eprintln!("error: {} problem(s), nothing written:", errors.len());
-        for m in &errors { eprintln!("{m}"); }
+        say!("error: {} problem(s), nothing written:", errors.len());
+        for m in &errors { say!("{m}"); }
         if errors.iter().any(|m| m.contains("over its")) {
-            eprintln!("Each file has to fit in the space its original took. Trim the edit (minify it, drop comments) and repack again.");
+            say!("Each file has to fit in the space its original took. Trim the edit (minify it, drop comments) and repack again.");
         }
         return ExitCode::from(1);
     }
     if changed.is_empty() {
-        eprintln!("no extracted file differs from the app's own; nothing written.");
+        say!("no extracted file differs from the app's own; nothing written.");
         return ExitCode::SUCCESS;
     }
 
@@ -139,24 +139,24 @@ pub fn run(path: &Path, dir: &Path, out: Option<&Path>) -> ExitCode {
         let bad = t.assets.iter().map(|a| (a.path.as_deref().unwrap_or_default(), &a.bytes))
             .find(|(k, orig)| got.get(k).copied() != Some(changed.get(*k).unwrap_or(orig)));
         if let Some((k, _)) = bad {
-            eprintln!("error: {k} did not read back correctly from the patched binary; nothing written. Please report this.");
+            say!("error: {k} did not read back correctly from the patched binary; nothing written. Please report this.");
             return ExitCode::from(1);
         }
     }
 
     let Some(out) = out else {
-        eprintln!("dry run: {} asset(s) would be patched, and the result checks out. Nothing written.", changed.len());
-        for k in changed.keys() { eprintln!("  {k}"); }
+        say!("dry run: {} asset(s) would be patched, and the result checks out. Nothing written.", changed.len());
+        for k in changed.keys() { say!("  {k}"); }
         return ExitCode::SUCCESS;
     };
-    if let Err(e) = std::fs::write(out, &data) { eprintln!("error: cannot write {}: {e}", out.display()); return ExitCode::from(1); }
+    if let Err(e) = std::fs::write(out, &data) { say!("error: cannot write {}: {e}", out.display()); return ExitCode::from(1); }
     if let Ok(m) = std::fs::metadata(&bin) { let _ = std::fs::set_permissions(out, m.permissions()); }
-    eprintln!("patched {} asset(s) -> {}", changed.len(), out.display());
-    for k in changed.keys() { eprintln!("  {k}"); }
+    say!("patched {} asset(s) -> {}", changed.len(), out.display());
+    for k in changed.keys() { say!("  {k}"); }
     match object::FileKind::parse(&*data) {
-        Ok(object::FileKind::MachO64 | object::FileKind::MachOFat32 | object::FileKind::MachOFat64) => eprintln!(
+        Ok(object::FileKind::MachO64 | object::FileKind::MachOFat32 | object::FileKind::MachOFat64) => say!(
             "note: the code signature no longer matches. Put the binary back in its .app and re-sign:\n  codesign --force --deep --preserve-metadata=entitlements -s - <App>.app"),
-        Ok(object::FileKind::Pe64 | object::FileKind::Pe32) => eprintln!(
+        Ok(object::FileKind::Pe64 | object::FileKind::Pe32) => say!(
             "note: if the app was code-signed, that signature no longer matches; Windows may warn before running it."),
         _ => {}
     }

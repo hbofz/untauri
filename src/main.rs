@@ -2,6 +2,12 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+// Status lines on stderr, with a leading label colored the way cargo does it. Defined
+// before the modules so every one of them can use it.
+macro_rules! say {
+    ($($t:tt)*) => { eprintln!("{}", crate::paint(&format!($($t)*), crate::color())) };
+}
+
 mod check;
 mod classify;
 mod inspect;
@@ -90,6 +96,24 @@ enum Cmd {
     },
 }
 
+// Color only for a terminal, and never when NO_COLOR is set (no-color.org).
+fn color() -> bool {
+    use std::io::IsTerminal;
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()))
+}
+
+fn paint(line: &str, color: bool) -> String {
+    const LABELS: [(&str, &str); 8] = [
+        ("error", "1;31"), ("warning", "1;33"), ("note", "1;36"),
+        ("complete", "1;32"), ("references", "1;32"), ("sources", "1;32"), ("patched", "1;32"), ("dry run", "1;32"),
+    ];
+    match LABELS.iter().find(|(l, _)| color && line.starts_with(l)) {
+        Some((l, code)) => format!("\x1b[{code}m{l}\x1b[0m{}", &line[l.len()..]),
+        None => line.to_string(),
+    }
+}
+
 pub struct Recovered {
     pub assets: Vec<scan::Asset>,
     pub undecoded: Vec<String>,
@@ -103,12 +127,12 @@ pub struct Recovered {
 pub fn recover(loaded: &target::Loaded, log: bool) -> Recovered {
     if let Some(t) = table::read(&loaded.data) {
         if log {
-            eprintln!("read Tauri's asset table: {} entries ({})", t.assets.len() + t.undecoded.len(),
+            say!("read Tauri's asset table: {} entries ({})", t.assets.len() + t.undecoded.len(),
                 if t.compressed { "brotli" } else { "uncompressed" });
         }
         return Recovered { assets: t.assets, undecoded: t.undecoded, from_table: true, compressed: t.compressed };
     }
-    if log { eprintln!("no Tauri asset table found; falling back to scanning for brotli streams (names and completeness are best-effort)"); }
+    if log { say!("no Tauri asset table found; falling back to scanning for brotli streams (names and completeness are best-effort)"); }
     let (mut assets, mut undecoded) = (Vec::new(), Vec::new());
     for r in &loaded.ranges {
         let (found, failed) = scan::walk(&loaded.data, r.clone());
@@ -121,7 +145,7 @@ pub fn recover(loaded: &target::Loaded, log: bool) -> Recovered {
 fn load(path: &std::path::Path) -> Option<target::Loaded> {
     match target::load(path) {
         Ok(l) => Some(l),
-        Err(e) => { eprintln!("error: not a readable binary: {} ({e})", path.display()); None }
+        Err(e) => { say!("error: not a readable binary: {} ({e})", path.display()); None }
     }
 }
 
@@ -153,56 +177,56 @@ fn main() -> ExitCode {
     // No HTML, JS or CSS means no frontend was found, whatever else decoded. Saying
     // "complete" over a pile of decoded noise is the worst possible answer.
     if !items.iter().any(|(_, k)| matches!(k, Kind::Html | Kind::Js | Kind::Css)) {
-        eprintln!("found {stream_count} streams but no HTML/JS/CSS: no web frontend recovered. This may not be a Tauri app, or it is a debug build that loads assets from disk.");
+        say!("found {stream_count} streams but no HTML/JS/CSS: no web frontend recovered. This may not be a Tauri app, or it is a debug build that loads assets from disk.");
         return ExitCode::from(2);
     }
 
     items.extend(hash_aliases(&undecoded, &items));
 
     if cli.verbose {
-        for (a, k) in &items { eprintln!("  {:>10} {:<5} off={} clen={}", a.bytes.len(), k.ext(), a.offset, a.compressed_len); }
+        for (a, k) in &items { say!("  {:>10} {:<5} off={} clen={}", a.bytes.len(), k.ext(), a.offset, a.compressed_len); }
     }
 
     let entries = match output::write(&cli.out, &items, cli.manifest_only, cli.tree) {
         Ok(entries) => entries,
-        Err(e) => { eprintln!("error writing output: {e}"); return ExitCode::from(1); }
+        Err(e) => { say!("error writing output: {e}"); return ExitCode::from(1); }
     };
-    eprintln!("recovered {} assets -> {}", entries.len(), cli.out.display());
+    say!("recovered {} assets -> {}", entries.len(), cli.out.display());
     if cli.sources && cli.manifest_only {
-        eprintln!("note: --sources does nothing with --manifest-only");
+        say!("note: --sources does nothing with --manifest-only");
     } else if cli.sources {
         // In --tree mode an extracted asset can itself live under sources/; never overwrite it.
         let reserved = entries.iter().filter_map(|e| e.name.strip_prefix("sources/")).map(sources::key).collect();
         let st = sources::write(&cli.out, sources::plan(items.iter().map(|(a, _)| a), &reserved));
         if st.maps == 0 {
-            eprintln!("sources: the app ships no source maps, so there is no original source to rebuild.");
+            say!("sources: the app ships no source maps, so there is no original source to rebuild.");
         } else {
-            eprintln!("sources: rebuilt {} original files from {} source maps -> {} ({} from node_modules)",
+            say!("sources: rebuilt {} original files from {} source maps -> {} ({} from node_modules)",
                 st.written, st.maps, cli.out.join("sources").display(), st.node_modules);
-            if st.unusable > 0 { eprintln!("  {} source maps could not be read (invalid JSON, or an index map with `sections`)", st.unusable); }
-            if st.no_content > 0 { eprintln!("  {} files are listed in the maps without their text, so they could not be rebuilt", st.no_content); }
-            if st.skipped > 0 { eprintln!("  {} files skipped (unusable path or write error)", st.skipped); }
+            if st.unusable > 0 { say!("  {} source maps could not be read (invalid JSON, or an index map with `sections`)", st.unusable); }
+            if st.no_content > 0 { say!("  {} files are listed in the maps without their text, so they could not be rebuilt", st.no_content); }
+            if st.skipped > 0 { say!("  {} files skipped (unusable path or write error)", st.skipped); }
         }
     }
     if from_table {
         if undecoded.is_empty() {
-            eprintln!("complete: all {table_len} entries in the app's asset table were extracted.");
+            say!("complete: all {table_len} entries in the app's asset table were extracted.");
         } else {
-            eprintln!("warning: {} of {table_len} table entries did not decode:", undecoded.len());
-            for u in &undecoded { eprintln!("  undecoded: {u}"); }
+            say!("warning: {} of {table_len} table entries did not decode:", undecoded.len());
+            for u in &undecoded { say!("  undecoded: {u}"); }
         }
     }
     let missing = check::missing(&items, &entries);
     if missing.is_empty() {
-        eprintln!("references: every JS/CSS chunk and font the bundle names (mapDeps, ./chunk imports, CSS url()) was extracted.");
+        say!("references: every JS/CSS chunk and font the bundle names (mapDeps, ./chunk imports, CSS url()) was extracted.");
     } else if from_table {
         // The table is everything the app embeds, so these are not extraction gaps: the
         // app loads them from elsewhere (network, disk, a runtime-built path) or never does.
-        eprintln!("note: {} name(s) referenced by the bundle are not in the app's asset table (loaded from elsewhere at runtime, or unused):", missing.len());
-        for m in &missing { eprintln!("  not embedded: {m}"); }
+        say!("note: {} name(s) referenced by the bundle are not in the app's asset table (loaded from elsewhere at runtime, or unused):", missing.len());
+        for m in &missing { say!("  not embedded: {m}"); }
     } else {
-        eprintln!("warning: {} asset(s) named by the recovered bundle were NOT extracted:", missing.len());
-        for m in &missing { eprintln!("  missing: {m}"); }
+        say!("warning: {} asset(s) named by the recovered bundle were NOT extracted:", missing.len());
+        for m in &missing { say!("  missing: {m}"); }
     }
     let incomplete = !undecoded.is_empty() || (!from_table && !missing.is_empty());
     if cli.strict && incomplete { ExitCode::from(3) } else { ExitCode::SUCCESS }
@@ -217,7 +241,7 @@ fn hash_aliases(undecoded: &[String], items: &[(scan::Asset, Kind)]) -> Vec<(sca
     for name in undecoded {
         let Some(key) = hash_key(name) else { continue };
         let Some((src, kind)) = items.iter().find(|(a, _)| a.name.as_deref().and_then(hash_key) == Some(key.clone())) else { continue };
-        eprintln!("note: {name} did not decode; emitting a copy of {} (same content hash)", src.name.as_deref().unwrap_or("?"));
+        say!("note: {name} did not decode; emitting a copy of {} (same content hash)", src.name.as_deref().unwrap_or("?"));
         // From the asset table, `name` is already the full key (`/assets/x-HASH.js`).
         // From the scanner it is a bare filename: put it in the twin's directory, so
         // `--tree` places the copy where the bundle expects to find it.
@@ -292,6 +316,16 @@ mod tests {
     fn does_not_alias_across_different_content_hashes() {
         let items = vec![asset("classDiagram-U1v2W3x4-ZZZZZZZZ.js")];
         assert!(hash_aliases(&["classDiagram-v2-Q7r8S9t0-M3n4O5p6.js".to_string()], &items).is_empty());
+    }
+
+    // Mutation check: drop the `color` guard and the plain case gets escape codes; break
+    // the slice and the rest of the line is lost.
+    #[test]
+    fn paint_colors_only_the_label() {
+        assert_eq!(paint("error: nope", true), "\x1b[1;31merror\x1b[0m: nope");
+        assert_eq!(paint("patched 1 asset(s)", true), "\x1b[1;32mpatched\x1b[0m 1 asset(s)");
+        assert_eq!(paint("error: nope", false), "error: nope");
+        assert_eq!(paint("recovered 61 assets", true), "recovered 61 assets");
     }
 
     // Kebab-case names with no content hash must NOT alias by their last word. Mutation
