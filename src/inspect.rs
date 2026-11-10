@@ -37,7 +37,7 @@ struct Report {
 }
 
 #[derive(Serialize)]
-struct Frontend { files: usize, bytes: usize, from_table: bool, compressed: bool, source_maps: usize }
+struct Frontend { files: usize, bytes: usize, from_table: bool, compressed: bool, source_maps: usize, original_sources: usize }
 
 fn name_byte(b: u8) -> bool { b.is_ascii_alphanumeric() || b == b'-' || b == b'_' }
 
@@ -200,10 +200,11 @@ pub fn run(loaded: &Loaded, json: bool, lock: Option<&Path>) -> ExitCode {
     let tauri = find_ver("tauri").or_else(|| git.get("tauri").map(|c| format!("git {}", c.iter().cloned().collect::<Vec<_>>().join(", "))));
     let rec = recover(loaded, false);
     let (mut plugin_commands, mut app_commands) = (BTreeMap::new(), BTreeSet::new());
-    let (mut bytes, mut maps) = (0, 0);
+    let mut bytes = 0;
+    let plan = crate::sources::plan(&rec.assets, &Default::default());
+    let (maps, original_sources) = (plan.stats.maps, plan.files.len());
     for a in &rec.assets {
         bytes += a.bytes.len();
-        if a.name.as_deref().is_some_and(|n| n.ends_with(".map")) { maps += 1; }
         if matches!(classify_asset(a.name.as_deref(), &a.bytes), Kind::Js | Kind::Html) {
             ipc(&a.bytes, &mut plugin_commands, &mut app_commands);
         }
@@ -213,7 +214,7 @@ pub fn run(loaded: &Loaded, json: bool, lock: Option<&Path>) -> ExitCode {
         binary: binary_kind(data),
         tauri, git,
         runtime, plugins,
-        frontend: Frontend { files: rec.assets.len(), bytes, from_table: rec.from_table, compressed: rec.compressed, source_maps: maps },
+        frontend: Frontend { files: rec.assets.len(), bytes, from_table: rec.from_table, compressed: rec.compressed, source_maps: maps, original_sources },
         plugin_commands, app_commands,
         crates: all,
     };
@@ -254,7 +255,7 @@ fn print_report(r: &Report) {
     let f = &r.frontend;
     println!("frontend  {} files, {} KB, {}{}", f.files, f.bytes / 1024,
         if !f.from_table { "found by scanning (best-effort)" } else if f.compressed { "brotli" } else { "uncompressed" },
-        if f.source_maps > 0 { format!(", {} source maps", f.source_maps) } else { String::new() });
+        if f.source_maps > 0 { format!(", {} source maps with {} original files (extract with --sources)", f.source_maps, f.original_sources) } else { String::new() });
     if !r.git.is_empty() {
         let g: Vec<String> = r.git.iter().map(|(repo, c)| format!("{repo} @ {}", c.iter().cloned().collect::<Vec<_>>().join(", "))).collect();
         println!("git deps  {}", g.join(", "));

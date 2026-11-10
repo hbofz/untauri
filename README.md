@@ -45,6 +45,7 @@ For Windows, `7z x MyApp.msi -omsi` gets you the `.exe`.
 |---|---|
 | `-o, --out <DIR>` | Output directory (default `unpacked`) |
 | `--tree` | Keep the app's own folder layout, so you can serve the output directly |
+| `--sources` | Also rebuild the original source files from shipped source maps |
 | `--strict` | Exit non-zero if any file failed to extract |
 | `--manifest-only` | Only write `assets.json` |
 | `--raw` | Also write streams that don't look like web files (fallback mode only) |
@@ -57,6 +58,20 @@ get `assets.json`, listing each file's name, size and offset in the binary.
 After extracting, untauri also scans the recovered JS, CSS and HTML for files they
 reference and tells you about any that aren't in the app. Those are usually loaded from
 the network or never used.
+
+## Original source
+
+Some apps ship their source maps (`.js.map`). Those often contain the full original
+source, before bundling and minifying. `--sources` writes it out to `out/sources/`:
+
+```
+$ untauri yaak -o out --sources
+...
+sources: rebuilt 1691 original files from 61 source maps -> out/sources (1221 from node_modules)
+```
+
+That is Yaak's own TypeScript (`apps/yaak-client/commands/importCurl.ts`, ...) as it
+was written, comments included. Most apps don't ship source maps, and untauri says so.
 
 ## Inspect
 
