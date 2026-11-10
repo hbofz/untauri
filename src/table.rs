@@ -30,6 +30,9 @@ pub struct Table {
     pub compressed: bool,
     // Asset key -> file offset of its entry in the `entries` array, for `patch`.
     pub slots: HashMap<String, usize>,
+    // Asset key -> (file offset, stored length) of its data, for every entry including
+    // ones that did not decode. Keys the linker merged share an offset.
+    pub spans: HashMap<String, (usize, usize)>,
 }
 
 struct Image<'a> {
@@ -166,6 +169,7 @@ fn from_image(data: &[u8], img: &Image) -> Option<Table> {
     let mut assets = Vec::new();
     let mut undecoded = Vec::new();
     let slots = runs[i].iter().map(|(k, _, _, s)| (k.clone(), *s)).collect();
+    let spans = runs[i].iter().map(|(k, o, l, _)| (k.clone(), (*o, *l))).collect();
     for ((key, off, len, _), dec) in runs[i].iter().zip(&decoded[i]) {
         let bytes = match (compressed, dec) {
             (true, Some(b)) => b.clone(),
@@ -175,7 +179,7 @@ fn from_image(data: &[u8], img: &Image) -> Option<Table> {
         let name = key.rsplit('/').next().filter(|n| !n.is_empty()).map(str::to_string);
         assets.push(Asset { offset: *off, compressed_len: *len, bytes, name, path: Some(key.clone()) });
     }
-    Some(Table { assets, undecoded, compressed, slots })
+    Some(Table { assets, undecoded, compressed, slots, spans })
 }
 
 // Replace an asset's stored bytes in place: write `stored` over its old bytes, zero the

@@ -55,6 +55,17 @@ By default files are grouped by type (`js/`, `css/`, `font/`, ...). `--tree` wri
 where the app expects them (`index.html`, `assets/index-BzYEIace.js`). Either way you
 get `assets.json`, listing each file's name, size and offset in the binary.
 
+To see what's inside without extracting, `untauri list MyApp.app` prints every file
+as a tree with its size (`--json` for scripts):
+
+```
+61 assets (560.2 KiB brotli, 2.7 MiB decompressed)
+├── 200.html (3.2 KiB, 983 B stored)
+├── _nuxt
+│   ├── 6S4jwJWB.js (110.0 KiB, 9.3 KiB stored)
+...
+```
+
 After extracting, untauri also scans the recovered JS, CSS and HTML for files they
 reference and tells you about any that aren't in the app. Those are usually loaded from
 the network or never used.
@@ -120,6 +131,8 @@ untauri MyApp.app -o out --tree
 # edit out/index.html, out/assets/main-A1b2C3d4.js, ...
 untauri repack MyApp.app out -o patched-binary
 ```
+
+Add `--dry-run` to check that everything fits and reads back correctly without writing.
 
 `--tree` keeps the app's own paths, so `out/index.html` is the real root page. (The
 default layout works too, but a multi-page app has several `index.html` files there;

@@ -5,6 +5,7 @@ use std::process::ExitCode;
 mod check;
 mod classify;
 mod inspect;
+mod list;
 mod output;
 mod repack;
 mod scan;
@@ -62,6 +63,14 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         lockfile: Option<PathBuf>,
     },
+    /// List the files an app embeds, as a tree with sizes, without extracting
+    List {
+        /// Path to a .app bundle or a raw executable
+        path: PathBuf,
+        /// Print the list as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Write edited files from an extracted directory back into the app binary
     ///
     /// Extract with untauri, edit files in the output directory, then repack. Each file
@@ -73,8 +82,11 @@ enum Cmd {
         /// The directory untauri extracted to (holds assets.json)
         dir: PathBuf,
         /// Where to write the patched executable
-        #[arg(short, long)]
-        out: PathBuf,
+        #[arg(short, long, required_unless_present = "dry_run")]
+        out: Option<PathBuf>,
+        /// Do everything, including the read-back check, but write nothing
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -119,8 +131,12 @@ fn main() -> ExitCode {
         let Some(loaded) = load(path) else { return ExitCode::from(1) };
         return inspect::run(&loaded, *json, lockfile.as_deref());
     }
-    if let Some(Cmd::Repack { path, dir, out }) = &cli.cmd {
-        return repack::run(path, dir, out);
+    if let Some(Cmd::List { path, json }) = &cli.cmd {
+        let Some(loaded) = load(path) else { return ExitCode::from(1) };
+        return list::run(&loaded, *json);
+    }
+    if let Some(Cmd::Repack { path, dir, out, dry_run }) = &cli.cmd {
+        return repack::run(path, dir, out.as_deref().filter(|_| !dry_run));
     }
     let Some(path) = cli.path.as_deref() else { return ExitCode::from(2) }; // clap enforces it
     let Some(loaded) = load(path) else { return ExitCode::from(1) };
