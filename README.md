@@ -1,23 +1,22 @@
 # untauri
 
-Get the web frontend (HTML, CSS, JS, fonts, images) back out of a compiled Tauri app.
+[![crates.io](https://img.shields.io/crates/v/untauri.svg)](https://crates.io/crates/untauri)
+[![license](https://img.shields.io/crates/l/untauri.svg)](LICENSE)
+
+Extract, inspect and patch the web frontend inside compiled Tauri apps.
 
 ![untauri extracting Jan's frontend, then inspecting Yaak](docs/demo.gif)
 
-Tauri doesn't ship your frontend as loose files. It compresses every file and bakes
-it into the executable, with a lookup table of names. untauri reads that table and
-writes every file back out under its original name.
-
-> [!WARNING]
-> Only use untauri on software you own or have explicit permission to analyze.
-> It does not give you any right to copy, modify or redistribute someone else's app,
-> and you are responsible for complying with the license and terms of any software
-> you run it on. Provided as is, without warranty (see [LICENSE](LICENSE)).
+A Tauri app doesn't ship its frontend as loose files. Every HTML, JS, CSS, font and
+image file is compressed and compiled into the executable, indexed by a table of
+paths. untauri reads that table directly, so every file comes back under its real
+name, byte for byte. It works on Linux, Windows and macOS binaries (universal builds
+included) and on Android libraries.
 
 ## Install
 
-Download a prebuilt binary for Windows, macOS or Linux from
-[Releases](https://github.com/hbofz/untauri/releases/latest), or with Rust installed:
+Prebuilt binaries for Linux, macOS and Windows are on the
+[releases page](https://github.com/hbofz/untauri/releases/latest). With Rust:
 
 ```
 cargo install untauri
@@ -25,55 +24,54 @@ cargo install untauri
 
 ## Usage
 
-```
-untauri MyApp.app -o out          # macOS bundle
-untauri ./my-app -o out           # any executable: Linux ELF, Windows .exe, Mach-O
-```
+| Command | |
+|---|---|
+| `untauri <app> -o out` | Extract every file |
+| `untauri list <app>` | List what the app embeds, with sizes |
+| `untauri inspect <app>` | Report the Tauri version, crates, plugins and IPC calls |
+| `untauri repack <app> out -o patched` | Write edited files back into the app |
 
-Linux packages need unpacking first. None of these run the app:
+`<app>` is a macOS `.app` bundle or an executable: ELF, PE (`.exe`), Mach-O, or an
+Android `.so`. Installers and packages need unpacking first. None of these commands
+run the app:
 
 ```
 dpkg-deb -x MyApp.deb pkg          # .deb
 rpm2cpio MyApp.rpm | cpio -idm     # .rpm
-7z x MyApp.AppImage -opkg          # .AppImage (don't use --appimage-extract, it runs the app)
+7z x MyApp.AppImage -opkg          # .AppImage (--appimage-extract would run it)
+7z x MyApp.msi -omsi               # .msi
 untauri pkg/usr/bin/my-app -o out
 ```
 
-For Windows, `7z x MyApp.msi -omsi` gets you the `.exe`.
+## Extract
+
+```
+untauri MyApp.app -o out
+```
+
+Files are grouped by type (`js/`, `css/`, `font/`, ...). With `--tree` they keep the
+app's own layout (`index.html`, `assets/index-BzYEIace.js`), so the output can be
+served as-is. Either way, `out/assets.json` records each file's path, size and offset
+in the binary.
+
+After extracting, untauri checks the recovered JS, CSS and HTML for files they
+reference and reports any the app doesn't contain. Those are usually loaded from the
+network, or never used.
 
 | Flag | |
 |---|---|
 | `-o, --out <DIR>` | Output directory (default `unpacked`) |
-| `--tree` | Keep the app's own folder layout, so you can serve the output directly |
-| `--sources` | Also rebuild the original source files from shipped source maps |
+| `--tree` | Keep the app's own folder layout |
+| `--sources` | Rebuild the original source files from shipped source maps |
 | `--strict` | Exit non-zero if any file failed to extract |
-| `--manifest-only` | Only write `assets.json` |
+| `--manifest-only` | Write only `assets.json` |
 | `--raw` | Also write streams that don't look like web files (fallback mode only) |
 | `-v, --verbose` | Print every asset to stderr |
 
-By default files are grouped by type (`js/`, `css/`, `font/`, ...). `--tree` writes them
-where the app expects them (`index.html`, `assets/index-BzYEIace.js`). Either way you
-get `assets.json`, listing each file's name, size and offset in the binary.
+### Original source
 
-To see what's inside without extracting, `untauri list MyApp.app` prints every file
-as a tree with its size (`--json` for scripts):
-
-```
-61 assets (560.2 KiB brotli, 2.7 MiB decompressed)
-├── 200.html (3.2 KiB, 983 B stored)
-├── _nuxt
-│   ├── 6S4jwJWB.js (110.0 KiB, 9.3 KiB stored)
-...
-```
-
-After extracting, untauri also scans the recovered JS, CSS and HTML for files they
-reference and tells you about any that aren't in the app. Those are usually loaded from
-the network or never used.
-
-## Original source
-
-Some apps ship their source maps (`.js.map`). Those often contain the full original
-source, before bundling and minifying. `--sources` writes it out to `out/sources/`:
+Some apps ship source maps, which often carry the complete original source from
+before bundling and minification. `--sources` writes it to `out/sources/`:
 
 ```
 $ untauri yaak -o out --sources
@@ -82,12 +80,24 @@ sources: rebuilt 1691 original files from 61 source maps -> out/sources (1221 fr
 ```
 
 That is Yaak's own TypeScript (`apps/yaak-client/commands/importCurl.ts`, ...) as it
-was written, comments included. Most apps don't ship source maps, and untauri says so.
+was written, comments included. Most apps don't ship source maps, and untauri says
+so when they don't.
+
+## List
+
+```
+$ untauri list kanri
+61 assets (560.2 KiB brotli, 2.7 MiB decompressed)
+├── 200.html (3.2 KiB, 983 B stored)
+├── 404.html (3.2 KiB, 983 B stored)
+├── _nuxt
+│   ├── 6S4jwJWB.js (110.0 KiB, 9.3 KiB stored)
+...
+```
+
+`--json` prints each file's path, offset, stored size and decompressed size.
 
 ## Inspect
-
-`untauri inspect` reports what an app is built with and what its frontend calls,
-without extracting anything:
 
 ```
 $ untauri inspect kanri
@@ -105,58 +115,53 @@ Both are lower bounds, and referenced is not granted: the app's capabilities dec
   ...
 ```
 
-Versions come from the source paths the Rust compiler leaves in release builds. Each
-one is exact, but only crates with code that can panic leave a path, so the list is a
-lower bound (macro and build-time crates never appear). Dependencies built from git,
-like a Tauri commit, are listed with their commit instead. To check the crates found
-for known vulnerabilities:
+Crate versions come from the source paths the Rust compiler leaves in release builds.
+Each version is exact, but only crates with code that can panic leave a path, so the
+list is a lower bound: macro and build-time crates never appear. Dependencies built
+from git are listed with their commit. To check the crates found for known
+vulnerabilities:
 
 ```
 untauri inspect MyApp --lockfile app.lock
 cargo audit -f app.lock
 ```
 
-A clean audit does not prove the app is clean, only that none of the crates found
-have advisories. The IPC list is also a lower bound: it catches `plugin:` strings and
-literal `invoke("...")` calls, but not calls made through a minified alias.
-
-`--json` prints the full report, including every crate.
+A clean audit means none of the crates found have advisories, not that the app has
+none. The IPC list is a lower bound too: it catches `plugin:` strings and literal
+`invoke("...")` calls, but not calls made through a minified alias. `--json` prints
+the full report.
 
 ## Repack
-
-Edit the extracted files, then write them back into the app:
 
 ```
 untauri MyApp.app -o out --tree
 # edit out/index.html, out/assets/main-A1b2C3d4.js, ...
-untauri repack MyApp.app out -o patched-binary
+untauri repack MyApp.app out -o patched
 ```
 
-Add `--dry-run` to check that everything fits and reads back correctly without writing.
+Only files that differ from the app's originals are written back. Each is compressed
+at whichever brotli level gives the smallest result and written over the original
+bytes, and its table entry's length is updated. Nothing else in the binary moves.
+`--dry-run` does everything except write the file.
 
-`--tree` keeps the app's own paths, so `out/index.html` is the real root page. (The
-default layout works too, but a multi-page app has several `index.html` files there;
-`assets.json` maps each output file to its key.)
+Before writing, untauri reads the patched binary back and checks that every edited
+file comes out as you left it and every other file is unchanged. It refuses a
+directory extracted from a different build of the app, so edits made against one
+version never land in another.
 
-Only files that differ from the app's own are written back. Each one is compressed
-at whichever brotli level gives the smallest result, then written over the original,
-with the table entry's length updated. Nothing else in the binary moves. Before
-writing, untauri reads the patched binary back and checks that every edited file
-comes out as you left it and every other file is untouched. It also refuses a
-directory extracted from a different build of the app, so edits made against an
-older version never get written into a newer one.
-
-- An edited file has to fit in the space its original took. That room is per file:
-  big files usually have a few KB to spare, tiny ones next to none. Uncompressed
-  builds have none at all, so an edit can't make a file bigger.
-- Identical files can be stored once and shared (Nuxt's `index.html` and `404.html`,
-  for example). Repack tells you when that happens. Make the same edit to all of
-  them, or to none.
-- Code signatures no longer match. On macOS, put the binary back in its `.app` and
-  re-sign it: `codesign --force --deep --preserve-metadata=entitlements -s - MyApp.app`.
-  On Windows, a signed app loses its valid signature and may get a SmartScreen warning.
-- If the app sets a CSP, Tauri allows its inline `<script>` blocks by their build-time
-  hash, so an edited inline script gets blocked. Edits to `.js` files are fine.
+- An edited file has to fit in the space its original took. Large files
+  usually have a few KB to spare and tiny ones almost none. In uncompressed builds a
+  file can't grow at all.
+- The linker stores identical files once (Nuxt's `index.html` and
+  `404.html`, for example). Repack names them when it finds them; make the same edit
+  to all of them, or to none.
+- Patching breaks the code signature. On macOS, put the binary back
+  in its `.app` and re-sign it with
+  `codesign --force --deep --preserve-metadata=entitlements -s - MyApp.app`. On
+  Windows, a signed app loses its valid signature.
+- If the app sets a Content Security Policy, Tauri allows its inline
+  `<script>` blocks by their build-time hash, so an edited inline script is blocked.
+  Edits to `.js` files are not affected.
 
 ## Tested on
 
@@ -171,20 +176,28 @@ Every file, under its real name, compared byte for byte against the app's own ta
 | Clash Verge Rev | Linux | 275 |
 | Spacedrive | Linux | 200 |
 | Pot | Linux | 180 |
+| End-WikiPlus | Android arm64 | 76 |
 | Kanri | Linux, macOS arm64 + x64, Windows | 61 |
 | Pake (ChatGPT) | Linux | 1 |
 
-Each one takes under a second.
+Each takes under a second.
 
 ## Limits
 
-- Each file is capped at 64MB decompressed, as a guard against decompression bombs.
-  The largest real asset seen so far is 11.4MB. A file over the cap is reported, not
+- You get the built frontend: bundled and minified, and without the Rust backend.
+- Each file is capped at 64 MB decompressed, as a guard against decompression bombs.
+  The largest real asset seen so far is 11.4 MB. A file over the cap is reported, not
   silently dropped.
 - The table reader handles 64-bit binaries. 32-bit builds (i686 Windows, for example)
-  fall back to the scanner.
-- You get the built frontend, not your source: minified, bundled, without the Rust side.
+  fall back to scanning the binary for compressed streams, which recovers the files
+  but not always their names.
+
+## Responsible use
+
+Use untauri only on software you own or have explicit permission to analyze. It
+gives you no right to copy, modify or redistribute someone else's app, and you are
+responsible for complying with the license and terms of any software you use it on.
 
 ## License
 
-MIT
+MIT. Provided as is, without warranty; see [LICENSE](LICENSE).
