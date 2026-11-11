@@ -8,9 +8,12 @@
 //
 // The segment also gets a `.untauri` section header. Without one, `strip` and `objcopy`
 // (which every Linux packaging tool runs) rebuild the file from its sections and drop
-// the data. The section header table and its name table are rewritten after the data
-// each time, so a later repack finds the segment by name, cuts them off, appends more
-// data and writes them again.
+// the data. The section header table and its name table are rewritten after the data.
+//
+// A later repack finds the segment by name and copies it to the end of the file at the
+// same address, so every pointer into it stays valid, then appends after the copy. It
+// never cuts anything off: after the first repack, tools like objcopy, `strip -g` or a
+// debuglink step move symbol and debug sections after ours, and they must survive.
 // ponytail: ELF only so far; PE and Mach-O each need their own segment surgery.
 
 const PT_LOAD: u32 = 1;
@@ -38,7 +41,7 @@ fn round_up(v: u64, a: u64) -> Option<u64> { v.checked_next_multiple_of(a) }
 
 // The R_*_RELATIVE type for this binary's architecture.
 fn relative_type(data: &[u8]) -> Option<u32> {
-    match u16_at(data, 0x12) { 62 => Some(8), 183 => Some(1027), 243 => Some(3), _ => None } // x86-64, aarch64, riscv
+    match u16_at(data, 0x12) { 62 => Some(8), 183 => Some(1027), _ => None } // x86-64, aarch64
 }
 
 pub fn supported(data: &[u8]) -> bool {
@@ -86,7 +89,8 @@ struct Sections { entries: Vec<[u8; 64]>, names: Vec<u8>, strndx: usize }
 impl Sections {
     fn read(data: &[u8]) -> Result<Sections, String> {
         let (off, n, strndx) = (u64_at(data, 0x28) as usize, u16_at(data, 0x3c) as usize, u16_at(data, 0x3e) as usize);
-        if n == 0 || n >= 0xff00 || strndx >= n { return Err("the binary's section headers are missing or use extended numbering".into()); }
+        // One below SHN_LORESERVE, so the section we may add still fits without extended numbering.
+        if n == 0 || n >= 0xfeff || strndx >= n { return Err("the binary's section headers are missing or use extended numbering".into()); }
         let table = data.get(off..off.checked_add(n * 64).ok_or("section headers out of bounds")?).ok_or("section headers out of bounds")?;
         let entries: Vec<[u8; 64]> = table.chunks(64).map(|c| c.try_into().unwrap()).collect();
         let (so, ss) = (u64_at(&entries[strndx], 24) as usize, u64_at(&entries[strndx], 32) as usize);
@@ -124,12 +128,26 @@ pub fn append(data: &mut Vec<u8>, blobs: &[Vec<u8>]) -> Result<Vec<u64>, String>
     let corrupt = || "the binary's program headers are inconsistent".to_string();
 
     let seg = match sh.find(SECTION) {
-        // An earlier repack's segment: drop the section tables written after it, then
-        // keep appending to it.
+        // An earlier repack's segment: copy it to the end of the file at the same address
+        // and keep appending there. Whatever sits after the old copy stays untouched.
         Some(s) => {
-            let start = u64_at(&sh.entries[s], 24);
-            let i = ph.iter().position(|p| p.kind == PT_LOAD && p.offset == start).ok_or_else(corrupt)?;
-            data.truncate(ph[i].offset.checked_add(ph[i].filesz).ok_or_else(corrupt)? as usize);
+            let e = &sh.entries[s];
+            let (addr, start, size) = (u64_at(e, 16), u64_at(e, 24), u64_at(e, 32));
+            let changed = || "the binary was changed after the last repack in a way repack can't follow; repack the original binary instead".to_string();
+            let i = ph.iter().position(|p| p.kind == PT_LOAD && p.vaddr == addr && p.offset == start && p.filesz == size && p.memsz == size)
+                .ok_or_else(changed)?;
+            // Growing it in memory must not run into another segment mapped above it.
+            let end = addr.checked_add(size).ok_or_else(corrupt)?;
+            if ph.iter().any(|p| p.kind == PT_LOAD && p.vaddr >= end) { return Err(changed()); }
+            let old = data.get(start as usize..(start as usize).checked_add(size as usize).ok_or_else(corrupt)?)
+                .ok_or_else(changed)?.to_vec();
+            let align = ph[i].align.max(1);
+            if !align.is_power_of_two() || align > MAX_ALIGN { return Err(corrupt()); }
+            let at = round_up(data.len() as u64, align).ok_or_else(corrupt)? + addr % align;
+            data.resize(at as usize, 0);
+            data.extend_from_slice(&old);
+            ph[i].offset = at;
+            put_u64(&mut sh.entries[s], 24, at);
             i
         }
         None => {

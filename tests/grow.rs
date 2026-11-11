@@ -63,6 +63,22 @@ fn grown_file_is_served_by_the_patched_binary() {
         };
         check(&patched2);
 
+        // objcopy rewrites the file and moves symbol and debug sections after ours. A repack
+        // after that must leave them intact (it once cut off everything after its segment).
+        let (copied, out3, patched3) = (exe("copied"), dir.join("out3"), exe("patched3"));
+        if Command::new("objcopy").arg(&patched2).arg(&copied).status().is_ok_and(|s| s.success()) {
+            let syms = |bin: &Path| Command::new("readelf").args(["-sW"]).arg(bin).output().map(|o| (o.stdout, o.stderr)).unwrap();
+            let x = untauri(&[copied.as_os_str(), "-o".as_ref(), out3.as_os_str(), "--tree".as_ref()]);
+            assert!(x.status.success());
+            std::fs::write(out3.join("index.html"), "<!doctype html>".to_string() + &"<p>more</p>".repeat(400)).unwrap();
+            let r = untauri(&["repack".as_ref(), copied.as_os_str(), out3.as_os_str(), "-o".as_ref(), patched3.as_os_str()]);
+            assert!(r.status.success(), "repack after objcopy failed: {}", String::from_utf8_lossy(&r.stderr));
+            let (before, after) = (syms(&copied), syms(&patched3));
+            assert!(after.1.is_empty(), "readelf complains after the repack: {}", String::from_utf8_lossy(&after.1));
+            assert_eq!(before.0, after.0, "the symbol table changed");
+            check(&patched3);
+        }
+
         // Packaging tools strip binaries. The grown data has a section of its own, so it
         // survives: without one, strip drops the segment and the app crashes.
         let stripped = exe("stripped");

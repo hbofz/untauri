@@ -161,7 +161,8 @@ version never land in another.
 - Growing a file turns the binary's `PT_NOTE` program header (build metadata the
   loader doesn't use) into the new segment; the note data itself stays in the file.
   The segment gets its own `.untauri` section, so stripping the binary afterwards
-  keeps it.
+  keeps it. A binary without section headers, or with Android's packed relocations,
+  can't be grown; repack says so and writes nothing.
 - The linker stores identical files once (Nuxt's `index.html` and
   `404.html`, for example). Repack names them when it finds them; make the same edit
   to all of them, or to none.
