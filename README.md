@@ -7,12 +7,6 @@ Extract, inspect and patch the web frontend inside compiled Tauri apps.
 
 ![untauri listing, extracting, inspecting and repacking Kanri](docs/demo.gif)
 
-A Tauri app doesn't ship its frontend as loose files. Every HTML, JS, CSS, font and
-image file is compressed and compiled into the executable, indexed by a table of
-paths. untauri reads that table directly, so every file comes back under its real
-name, byte for byte. It works on Linux, Windows and macOS binaries (universal builds
-included) and on Android libraries.
-
 ## Install
 
 Prebuilt binaries for Linux, macOS and Windows are on the
@@ -22,59 +16,40 @@ Prebuilt binaries for Linux, macOS and Windows are on the
 cargo install untauri
 ```
 
-## Usage
-
-| Command | |
-|---|---|
-| `untauri <app> -o out` | Extract every file |
-| `untauri list <app>` | List what the app embeds, with sizes |
-| `untauri inspect <app>` | Report the Tauri version, crates, plugins and IPC calls |
-| `untauri repack <app> out -o patched` | Write edited files back into the app |
-
-Output is colored in a terminal. `NO_COLOR=1` turns that off, and `CLICOLOR_FORCE=1`
-keeps it when you pipe (the demo above sets it so `| head` stays colored).
-
-`<app>` is a macOS `.app` bundle or an executable: ELF, PE (`.exe`), Mach-O, or an
-Android `.so`. Installers and packages need unpacking first. None of these commands
-run the app:
+## Quick start
 
 ```
-dpkg-deb -x MyApp.deb pkg          # .deb
-rpm2cpio MyApp.rpm | cpio -idm     # .rpm
-7z x MyApp.AppImage -opkg          # .AppImage (--appimage-extract would run it)
-7z x MyApp.msi -omsi               # .msi
-untauri pkg/usr/bin/my-app -o out
+untauri MyApp.app -o out                 # extract every file
+untauri list MyApp.app                   # see what's inside, with sizes
+untauri inspect MyApp.app                # Tauri version, crates, plugins, IPC calls
+untauri repack MyApp.app out -o patched  # write your edits back
 ```
+
+The app can be a macOS `.app` bundle or an executable: Linux ELF, Windows `.exe`,
+macOS Mach-O or an Android `.so`. Unpack installers first, without running them:
+
+```
+dpkg-deb -x MyApp.deb pkg        # .deb
+7z x MyApp.msi -omsi             # .msi
+7z x MyApp.AppImage -opkg        # .AppImage (--appimage-extract would run it)
+```
+
+Other formats, like `.rpm` and `.apk`: [docs/extract.md](docs/extract.md#getting-the-binary).
 
 ## Extract
 
 ```
-untauri MyApp.app -o out
+$ untauri kanri -o out --tree
+read Tauri's asset table: 61 entries (brotli)
+recovered 61 assets -> out
+complete: all 61 entries in the app's asset table were extracted.
+note: 1 name(s) referenced by the bundle are not in the app's asset table (loaded from elsewhere at runtime, or unused):
+  not embedded: kanri_theme_export.json
 ```
 
-Files are grouped by type (`js/`, `css/`, `font/`, ...). With `--tree` they keep the
-app's own layout (`index.html`, `assets/index-BzYEIace.js`), so the output can be
-served as-is. Either way, `out/assets.json` records each file's path, size and offset
-in the binary.
-
-After extracting, untauri checks the recovered JS, CSS and HTML for files they
-reference and reports any the app doesn't contain. Those are usually loaded from the
-network, or never used.
-
-| Flag | |
-|---|---|
-| `-o, --out <DIR>` | Output directory (default `unpacked`) |
-| `--tree` | Keep the app's own folder layout |
-| `--sources` | Rebuild the original source files from shipped source maps |
-| `--strict` | Exit non-zero if any file failed to extract |
-| `--manifest-only` | Write only `assets.json` |
-| `--raw` | Also write streams that don't look like web files (fallback mode only) |
-| `-v, --verbose` | Print every asset to stderr |
-
-### Original source
-
-Some apps ship source maps, which often carry the complete original source from
-before bundling and minification. `--sources` writes it to `out/sources/`:
+`--tree` keeps the app's own folder layout, so `out/` can be served as-is. Without
+it, files are grouped by type. If the app ships source maps, `--sources` rebuilds
+the original source too:
 
 ```
 $ untauri yaak -o out --sources
@@ -82,9 +57,7 @@ $ untauri yaak -o out --sources
 sources: rebuilt 1691 original files from 61 source maps -> out/sources (1221 from node_modules)
 ```
 
-That is Yaak's own TypeScript (`apps/yaak-client/commands/importCurl.ts`, ...) as it
-was written, comments included. Most apps don't ship source maps, and untauri says
-so when they don't.
+All flags: `untauri --help`. More in [docs/extract.md](docs/extract.md).
 
 ## List
 
@@ -98,7 +71,7 @@ $ untauri list kanri
 ...
 ```
 
-`--json` prints each file's path, offset, stored size and decompressed size.
+`--json` prints the same as JSON.
 
 ## Inspect
 
@@ -118,100 +91,49 @@ Both are lower bounds, and referenced is not granted: the app's capabilities dec
   ...
 ```
 
-Crate versions come from the source paths the Rust compiler leaves in release builds.
-Each version is exact, but only crates with code that can panic leave a path, so the
-list is a lower bound: macro and build-time crates never appear. Dependencies built
-from git are listed with their commit. To check the crates found for known
-vulnerabilities:
+To check the crates it found for known vulnerabilities:
 
 ```
 untauri inspect MyApp --lockfile app.lock
 cargo audit -f app.lock
 ```
 
-A clean audit means none of the crates found have advisories, not that the app has
-none. The IPC list is a lower bound too: it catches `plugin:` strings and literal
-`invoke("...")` calls, but not calls made through a minified alias. `--json` prints
-the full report.
+Every list here is a lower bound, so a crate or call that's missing may still be in
+the app. Why, and what a clean audit does and doesn't tell you:
+[docs/inspect.md](docs/inspect.md).
 
 ## Repack
 
 ```
-untauri MyApp.app -o out --tree
-# edit out/index.html, out/assets/main-A1b2C3d4.js, ...
-untauri repack MyApp.app out -o patched
+$ untauri kanri -o out --tree
+$ sed -i 's|<head>|<head><title>Patched</title>|' out/index.html
+$ untauri repack kanri out -o kanri-patched
+patched 1 asset(s) -> kanri-patched
+  /index.html
 ```
 
-Only files that differ from the app's originals are written back. Each is compressed
-at whichever brotli level gives the smallest result. If it still fits where the
-original was, it's written over the original bytes and nothing else in the binary
-moves. If it doesn't, it goes into a new read-only segment at the end of the binary
-and its table entry points there instead. `--dry-run` does everything except write
-the file.
+- Edited files can be any size. One that no longer fits where the original was is
+  moved to new space at the end of the binary. (Not yet in universal macOS apps,
+  where an edit has to fit.)
+- `--dry-run` does everything except write the file.
+- Patching breaks code signatures. On macOS, re-sign before launching:
+  `codesign --force --deep --preserve-metadata=entitlements -s - MyApp.app`
+- The linker stores identical files once (Nuxt's `index.html` and `404.html`, for
+  example). Give them the same edit, or none.
+- If the app sets a Content Security Policy, an edited inline `<script>` is blocked.
+  Edit the `.js` files instead.
 
-Before writing, untauri reads the patched binary back and checks that every edited
-file comes out as you left it and every other file is unchanged. It refuses a
-directory extracted from a different build of the app, so edits made against one
-version never land in another.
-
-- In 64-bit Linux, Android, Windows and macOS binaries a file can grow as much as it
-  needs. Universal (multi-architecture) macOS binaries are next; until then a file
-  there has to fit in the space its original took. Large files usually have a few KB to spare, tiny ones almost none,
-  and in uncompressed builds a file can't grow at all.
-- Linux and Android: growing turns the binary's `PT_NOTE` program header (build
-  metadata the loader doesn't use) into the new segment; the note data itself stays
-  in the file. The segment gets its own `.untauri` section, so stripping the binary
-  afterwards keeps it. A binary without section headers, or with Android's packed
-  relocations, can't be grown; repack says so and writes nothing.
-- Windows: the grown files go in a new `.untauri` section. A signature at the end of
-  the file is removed, since patching breaks it anyway, and the PE checksum (when the
-  file has one) is recomputed. An executable with other data appended after its last
-  section (some installers do this), or with no room left for another section
-  header, is refused.
-- macOS: the grown files go in a new `__UNTAURI` segment just before `__LINKEDIT`,
-  which moves up to make room (codesign needs it last). Its load command uses the
-  padding the linker leaves after the load commands; a binary without room is
-  refused. Re-signing (below) is required: Apple Silicon won't run the patched
-  binary until it is signed again.
-- The linker stores identical files once (Nuxt's `index.html` and
-  `404.html`, for example). Repack names them when it finds them; make the same edit
-  to all of them, or to none.
-- Patching breaks the code signature. On macOS, put the binary back
-  in its `.app` and re-sign it with
-  `codesign --force --deep --preserve-metadata=entitlements -s - MyApp.app`. On
-  Windows, a signed app loses its valid signature.
-- If the app sets a Content Security Policy, Tauri allows its inline
-  `<script>` blocks by their build-time hash, so an edited inline script is blocked.
-  Edits to `.js` files are not affected.
-
-## Tested on
-
-Every file, under its real name, compared byte for byte against the app's own table:
-
-| App | Platform | Files |
-|---|---|---|
-| Modrinth | Linux | 877 |
-| Surrealist | Linux, macOS arm64 | 648 |
-| Jan | Linux, macOS universal | 559 |
-| Yaak | Linux | 321 |
-| Clash Verge Rev | Linux | 275 |
-| Spacedrive | Linux | 200 |
-| Pot | Linux | 180 |
-| End-WikiPlus | Android arm64 | 76 |
-| Kanri | Linux, macOS arm64 + x64, Windows | 61 |
-| Pake (ChatGPT) | Linux | 1 |
-
-Each takes under a second.
+How it works, and the few cases it refuses: [docs/repack.md](docs/repack.md).
 
 ## Limits
 
-- You get the built frontend: bundled and minified, and without the Rust backend.
-- Each file is capped at 64 MB decompressed, as a guard against decompression bombs.
-  The largest real asset seen so far is 11.4 MB. A file over the cap is reported, not
-  silently dropped.
-- The table reader handles 64-bit binaries. 32-bit builds (i686 Windows, for example)
-  fall back to scanning the binary for compressed streams, which recovers the files
-  but not always their names.
+- You get the built frontend, bundled and minified. The Rust backend isn't
+  recovered.
+- 32-bit apps fall back to scanning the binary, which can miss file names.
+- A file over 64 MB decompressed is reported, not extracted.
+
+Verified byte for byte on ten real apps, from Modrinth (877 files) to Pake (1):
+[list](docs/extract.md#tested-on).
 
 ## Responsible use
 
