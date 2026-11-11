@@ -9,6 +9,7 @@ macro_rules! say {
 }
 
 mod check;
+mod grow;
 mod classify;
 mod inspect;
 mod list;
@@ -79,9 +80,9 @@ enum Cmd {
     },
     /// Write edited files from an extracted directory back into the app binary
     ///
-    /// Extract with untauri, edit files in the output directory, then repack. Each file
-    /// is patched in place, so an edited file must still fit in the space its original
-    /// took (brotli-compressed when the app was built that way).
+    /// Extract with untauri, edit files in the output directory, then repack. A file that
+    /// still fits is patched in place. One that has grown moves to a new segment at the
+    /// end of the binary (Linux and Android binaries; elsewhere it must still fit).
     Repack {
         /// Path to the original .app bundle or raw executable
         path: PathBuf,
