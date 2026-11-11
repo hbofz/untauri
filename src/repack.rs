@@ -1,14 +1,14 @@
 // Write edited files back into a Tauri binary.
 //
-// Each asset is patched in place (see `table::patch`): the new bytes, brotli-compressed
-// when the app was built that way, go over the old ones and the entry's length shrinks
-// to match. Nothing moves, so no pointer, relocation or section header changes. The
-// catch: an edited file must still fit in its original span.
-// ponytail: in-place only; growing an asset needs a new section per format (ELF, Mach-O, PE).
+// An asset that still fits is patched in place (see `table::patch`): the new bytes,
+// brotli-compressed when the app was built that way, go over the old ones and the
+// entry's length shrinks to match, so nothing else in the binary changes. One that no
+// longer fits moves to a new segment at the end of the binary (see `grow`), which only
+// ELF supports so far; elsewhere it must still fit.
 
 use crate::output::{content_hash, Entry};
 use crate::scan::Asset;
-use crate::{table, target};
+use crate::{grow, table, target};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::Path;
@@ -61,6 +61,11 @@ pub fn run(path: &Path, dir: &Path, out: Option<&Path>) -> ExitCode {
     let mut mismatched: Vec<String> = Vec::new();
     let mut before: Vec<table::Table> = Vec::new();
     let slices = target::slices(&data);
+    // Files that no longer fit in place: (entry slots, stored bytes). They move to new
+    // space at the end of the binary once every in-place patch is done.
+    let can_grow = slices.len() == 1 && grow::supported(&data);
+    let mut grown: Vec<(Vec<usize>, Vec<u8>)> = Vec::new();
+    let mut moved: Vec<String> = Vec::new();
     for (i, r) in slices.iter().enumerate() {
         let slice = &mut data[r.clone()];
         let Some(t) = table::read(slice) else {
@@ -103,6 +108,10 @@ pub fn run(path: &Path, dir: &Path, out: Option<&Path>) -> ExitCode {
             let slots: Vec<usize> = group.iter().map(|a| t.slots[&key(a)]).collect();
             match table::patch(slice, group[0], &slots, &stored) {
                 Ok(()) => for a in group { changed.insert(key(a), want[0].clone()); },
+                Err(_) if can_grow => {
+                    for a in group { changed.insert(key(a), want[0].clone()); moved.push(key(a)); }
+                    grown.push((slots, stored));
+                }
                 Err(over) => errors.push(format!("  {}: {over} bytes over its {}-byte slot", key(group[0]), group[0].compressed_len)),
             }
         }
@@ -121,7 +130,7 @@ pub fn run(path: &Path, dir: &Path, out: Option<&Path>) -> ExitCode {
         say!("error: {} problem(s), nothing written:", errors.len());
         for m in &errors { say!("{m}"); }
         if errors.iter().any(|m| m.contains("over its")) {
-            say!("Each file has to fit in the space its original took. Trim the edit (minify it, drop comments) and repack again.");
+            say!("Each file has to fit in the space its original took. Trim the edit (minify it, drop comments) and repack again. (Growing files is supported for Linux and Android binaries so far.)");
         }
         return ExitCode::from(1);
     }
@@ -129,6 +138,20 @@ pub fn run(path: &Path, dir: &Path, out: Option<&Path>) -> ExitCode {
         say!("no extracted file differs from the app's own; nothing written.");
         return ExitCode::SUCCESS;
     }
+
+    if !grown.is_empty() {
+        let blobs: Vec<Vec<u8>> = grown.iter().map(|g| g.1.clone()).collect();
+        let res = grow::append(&mut data, &blobs).and_then(|vaddrs| {
+            for ((slots, stored), va) in grown.iter().zip(vaddrs) {
+                for &s in slots { grow::point(&mut data, s, va, stored.len())?; }
+            }
+            Ok(())
+        });
+        if let Err(e) = res { say!("error: {e}. Nothing written."); return ExitCode::from(1); }
+    }
+    // Growing made the file longer, so re-measure it before the read-back.
+    let slices = if grown.is_empty() { slices } else { target::slices(&data) };
+    let listing = |k: &str| say!("  {k}{}", if moved.iter().any(|m| m == k) { " (grown: moved to new space at the end of the binary)" } else { "" });
 
     // Read the result back the same way extraction does: every edited file must come
     // out as edited and every other file exactly as it was, so a bad patch never ships.
@@ -146,13 +169,13 @@ pub fn run(path: &Path, dir: &Path, out: Option<&Path>) -> ExitCode {
 
     let Some(out) = out else {
         say!("dry run: {} asset(s) would be patched, and the result checks out. Nothing written.", changed.len());
-        for k in changed.keys() { say!("  {k}"); }
+        for k in changed.keys() { listing(k); }
         return ExitCode::SUCCESS;
     };
     if let Err(e) = std::fs::write(out, &data) { say!("error: cannot write {}: {e}", out.display()); return ExitCode::from(1); }
     if let Ok(m) = std::fs::metadata(&bin) { let _ = std::fs::set_permissions(out, m.permissions()); }
     say!("patched {} asset(s) -> {}", changed.len(), out.display());
-    for k in changed.keys() { say!("  {k}"); }
+    for k in changed.keys() { listing(k); }
     match object::FileKind::parse(&*data) {
         Ok(object::FileKind::MachO64 | object::FileKind::MachOFat32 | object::FileKind::MachOFat64) => say!(
             "note: the code signature no longer matches. Put the binary back in its .app and re-sign:\n  codesign --force --deep --preserve-metadata=entitlements -s - <App>.app"),

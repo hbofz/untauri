@@ -143,18 +143,26 @@ untauri repack MyApp.app out -o patched
 ```
 
 Only files that differ from the app's originals are written back. Each is compressed
-at whichever brotli level gives the smallest result and written over the original
-bytes, and its table entry's length is updated. Nothing else in the binary moves.
-`--dry-run` does everything except write the file.
+at whichever brotli level gives the smallest result. If it still fits where the
+original was, it's written over the original bytes and nothing else in the binary
+moves. If it doesn't, it goes into a new read-only segment at the end of the binary
+and its table entry points there instead. `--dry-run` does everything except write
+the file.
 
 Before writing, untauri reads the patched binary back and checks that every edited
 file comes out as you left it and every other file is unchanged. It refuses a
 directory extracted from a different build of the app, so edits made against one
 version never land in another.
 
-- An edited file has to fit in the space its original took. Large files
-  usually have a few KB to spare and tiny ones almost none. In uncompressed builds a
-  file can't grow at all.
+- In 64-bit Linux and Android binaries a file can grow as much as it needs. Windows
+  and macOS support is next; until then a file there has to fit in the space its
+  original took. Large files usually have a few KB to spare, tiny ones almost none,
+  and in uncompressed builds a file can't grow at all.
+- Growing a file turns the binary's `PT_NOTE` program header (build metadata the
+  loader doesn't use) into the new segment; the note data itself stays in the file.
+  The segment gets its own `.untauri` section, so stripping the binary afterwards
+  keeps it. A binary without section headers, or with Android's packed relocations,
+  can't be grown; repack says so and writes nothing.
 - The linker stores identical files once (Nuxt's `index.html` and
   `404.html`, for example). Repack names them when it finds them; make the same edit
   to all of them, or to none.
