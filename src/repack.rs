@@ -1,10 +1,10 @@
 // Write edited files back into a Tauri binary.
 //
-// Each asset is patched in place (see `table::patch`): the new bytes, brotli-compressed
-// when the app was built that way, go over the old ones and the entry's length shrinks
-// to match. Nothing moves, so no pointer, relocation or section header changes. The
-// catch: an edited file must still fit in its original span.
-// ponytail: in-place only; growing an asset needs a new section per format (ELF, Mach-O, PE).
+// An asset that still fits is patched in place (see `table::patch`): the new bytes,
+// brotli-compressed when the app was built that way, go over the old ones and the
+// entry's length shrinks to match, so nothing else in the binary changes. One that no
+// longer fits moves to a new segment at the end of the binary (see `grow`), which only
+// ELF supports so far; elsewhere it must still fit.
 
 use crate::output::{content_hash, Entry};
 use crate::scan::Asset;

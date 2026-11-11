@@ -154,13 +154,14 @@ file comes out as you left it and every other file is unchanged. It refuses a
 directory extracted from a different build of the app, so edits made against one
 version never land in another.
 
-- Files can grow without limit in Linux and Android binaries. Windows and macOS
-  support is next; until then a file there has to fit in the space its original
-  took. Large files usually have a few KB to spare, tiny ones almost none, and in
-  uncompressed builds a file can't grow at all.
-- Growing a file in a Linux or Android binary turns its `PT_NOTE` program header
-  (build metadata the loader doesn't use) into the new segment. The note data itself
-  stays in the file.
+- In 64-bit Linux and Android binaries a file can grow as much as it needs. Windows
+  and macOS support is next; until then a file there has to fit in the space its
+  original took. Large files usually have a few KB to spare, tiny ones almost none,
+  and in uncompressed builds a file can't grow at all.
+- Growing a file turns the binary's `PT_NOTE` program header (build metadata the
+  loader doesn't use) into the new segment; the note data itself stays in the file.
+  The segment gets its own `.untauri` section, so stripping the binary afterwards
+  keeps it.
 - The linker stores identical files once (Nuxt's `index.html` and
   `404.html`, for example). Repack names them when it finds them; make the same edit
   to all of them, or to none.

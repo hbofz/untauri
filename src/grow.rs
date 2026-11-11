@@ -4,8 +4,13 @@
 // ELF (Linux, Android): the program header table has no spare entry, so the PT_NOTE entry
 // becomes the new PT_LOAD. Notes are build metadata (build id, ABI tag) that the loader
 // does not need; the note sections themselves stay in the file. The entry moves to just
-// after the last PT_LOAD, because loaders expect PT_LOADs sorted by address. A later
-// repack of the same binary extends that segment instead of needing another note.
+// after the last PT_LOAD, because loaders expect PT_LOADs sorted by address.
+//
+// The segment also gets a `.untauri` section header. Without one, `strip` and `objcopy`
+// (which every Linux packaging tool runs) rebuild the file from its sections and drop
+// the data. The section header table and its name table are rewritten after the data
+// each time, so a later repack finds the segment by name, cuts them off, appends more
+// data and writes them again.
 // ponytail: ELF only so far; PE and Mach-O each need their own segment surgery.
 
 const PT_LOAD: u32 = 1;
@@ -14,20 +19,31 @@ const PT_NOTE: u32 = 4;
 const PT_GNU_PROPERTY: u32 = 0x6474_e553;
 const DT_RELA: u64 = 7;
 const DT_RELASZ: u64 = 8;
-// R_X86_64_RELATIVE, R_AARCH64_RELATIVE, R_RISCV_RELATIVE
-const RELATIVE: [u32; 3] = [8, 1027, 3];
+// Android's packed relocations: their addends can't be edited in place, and with
+// --apply-dynamic-relocs our read-back would not notice the stale one.
+const DT_ANDROID_REL: u64 = 0x6000_000f;
+const DT_ANDROID_RELA: u64 = 0x6000_0011;
+const SECTION: &[u8] = b".untauri";
+// Largest page size a real build uses (2 MiB huge pages); anything bigger is corrupt.
+const MAX_ALIGN: u64 = 2 << 20;
 
 #[derive(Clone, Copy)]
-struct Phdr { kind: u32, flags: u32, offset: u64, vaddr: u64, filesz: u64, memsz: u64, align: u64 }
+struct Phdr { kind: u32, flags: u32, offset: u64, vaddr: u64, paddr: u64, filesz: u64, memsz: u64, align: u64 }
 
 fn u16_at(d: &[u8], o: usize) -> u16 { u16::from_le_bytes(d[o..o + 2].try_into().unwrap()) }
 fn u32_at(d: &[u8], o: usize) -> u32 { u32::from_le_bytes(d[o..o + 4].try_into().unwrap()) }
 fn u64_at(d: &[u8], o: usize) -> u64 { u64::from_le_bytes(d[o..o + 8].try_into().unwrap()) }
 fn put_u64(d: &mut [u8], o: usize, v: u64) { d[o..o + 8].copy_from_slice(&v.to_le_bytes()); }
-fn round_up(v: u64, a: u64) -> u64 { v.div_ceil(a) * a }
+fn round_up(v: u64, a: u64) -> Option<u64> { v.checked_next_multiple_of(a) }
+
+// The R_*_RELATIVE type for this binary's architecture.
+fn relative_type(data: &[u8]) -> Option<u32> {
+    match u16_at(data, 0x12) { 62 => Some(8), 183 => Some(1027), 243 => Some(3), _ => None } // x86-64, aarch64, riscv
+}
 
 pub fn supported(data: &[u8]) -> bool {
-    data.len() > 64 && data.starts_with(b"\x7fELF") && data[4] == 2 && data[5] == 1 && u16_at(data, 0x36) == 56
+    data.len() > 64 && data.starts_with(b"\x7fELF") && data[4] == 2 && data[5] == 1
+        && u16_at(data, 0x36) == 56 && u16_at(data, 0x3a) == 64 && relative_type(data).is_some()
 }
 
 // (offset of the table in the file, entries)
@@ -37,7 +53,7 @@ fn phdrs(data: &[u8]) -> Result<(usize, Vec<Phdr>), String> {
     Ok((off, (0..n).map(|i| {
         let o = off + i * 56;
         Phdr { kind: u32_at(data, o), flags: u32_at(data, o + 4), offset: u64_at(data, o + 8), vaddr: u64_at(data, o + 16),
-               filesz: u64_at(data, o + 32), memsz: u64_at(data, o + 40), align: u64_at(data, o + 48) }
+               paddr: u64_at(data, o + 24), filesz: u64_at(data, o + 32), memsz: u64_at(data, o + 40), align: u64_at(data, o + 48) }
     }).collect()))
 }
 
@@ -46,7 +62,7 @@ fn write_phdrs(data: &mut [u8], off: usize, ph: &[Phdr]) {
         let o = off + i * 56;
         data[o..o + 4].copy_from_slice(&p.kind.to_le_bytes());
         data[o + 4..o + 8].copy_from_slice(&p.flags.to_le_bytes());
-        for (f, v) in [(8, p.offset), (16, p.vaddr), (24, p.vaddr), (32, p.filesz), (40, p.memsz), (48, p.align)] { put_u64(data, o + f, v); }
+        for (f, v) in [(8, p.offset), (16, p.vaddr), (24, p.paddr), (32, p.filesz), (40, p.memsz), (48, p.align)] { put_u64(data, o + f, v); }
     }
 }
 
@@ -57,46 +73,106 @@ fn vaddr_to_file(ph: &[Phdr], va: u64) -> Option<usize> {
     ph.iter().find(|p| p.kind == PT_LOAD && va >= p.vaddr && va - p.vaddr < p.filesz).map(|p| (va - p.vaddr + p.offset) as usize)
 }
 
+fn dynamic(data: &[u8], ph: &[Phdr]) -> Vec<(u64, u64)> {
+    let Some(p) = ph.iter().find(|p| p.kind == PT_DYNAMIC) else { return vec![] };
+    let end = p.offset.saturating_add(p.filesz).min(data.len() as u64) as usize;
+    (p.offset as usize..end).step_by(16).filter(|o| o + 16 <= end)
+        .map(|o| (u64_at(data, o), u64_at(data, o + 8))).take_while(|&(t, _)| t != 0).collect()
+}
+
+// The section header table and its name table, read out of the file.
+struct Sections { entries: Vec<[u8; 64]>, names: Vec<u8>, strndx: usize }
+
+impl Sections {
+    fn read(data: &[u8]) -> Result<Sections, String> {
+        let (off, n, strndx) = (u64_at(data, 0x28) as usize, u16_at(data, 0x3c) as usize, u16_at(data, 0x3e) as usize);
+        if n == 0 || n >= 0xff00 || strndx >= n { return Err("the binary's section headers are missing or use extended numbering".into()); }
+        let table = data.get(off..off.checked_add(n * 64).ok_or("section headers out of bounds")?).ok_or("section headers out of bounds")?;
+        let entries: Vec<[u8; 64]> = table.chunks(64).map(|c| c.try_into().unwrap()).collect();
+        let (so, ss) = (u64_at(&entries[strndx], 24) as usize, u64_at(&entries[strndx], 32) as usize);
+        let names = data.get(so..so.checked_add(ss).ok_or("section names out of bounds")?).ok_or("section names out of bounds")?.to_vec();
+        Ok(Sections { entries, names, strndx })
+    }
+    fn find(&self, name: &[u8]) -> Option<usize> {
+        self.entries.iter().position(|e| {
+            let at = u32_at(e, 0) as usize;
+            self.names.get(at..).and_then(|s| s.split(|&b| b == 0).next()) == Some(name)
+        })
+    }
+    // Write the name table and the section header table at the end of the file.
+    fn append_to(&mut self, data: &mut Vec<u8>) {
+        let at = data.len() as u64;
+        put_u64(&mut self.entries[self.strndx], 24, at);
+        put_u64(&mut self.entries[self.strndx], 32, self.names.len() as u64);
+        data.extend_from_slice(&self.names);
+        data.resize(data.len().next_multiple_of(8), 0);
+        let shoff = data.len() as u64;
+        for e in &self.entries { data.extend_from_slice(e); }
+        put_u64(data, 0x28, shoff);
+        data[0x3c..0x3e].copy_from_slice(&(self.entries.len() as u16).to_le_bytes());
+    }
+}
+
 // Append `blobs` to the binary, mapped read-only. Returns each blob's virtual address.
 pub fn append(data: &mut Vec<u8>, blobs: &[Vec<u8>]) -> Result<Vec<u64>, String> {
     if !supported(data) { return Err("growing a file past its original size is supported for 64-bit ELF (Linux, Android) so far".into()); }
     let (off, mut ph) = phdrs(data)?;
-    let loads: Vec<usize> = (0..ph.len()).filter(|&i| ph[i].kind == PT_LOAD).collect();
-    let top = loads.iter().map(|&i| ph[i].vaddr + ph[i].memsz).max().ok_or("no loadable segments")?;
-    let align = loads.iter().map(|&i| ph[i].align).max().unwrap_or(0).max(0x1000);
-    let file_end = data.len() as u64;
+    if dynamic(data, &ph).iter().any(|&(t, _)| t == DT_ANDROID_REL || t == DT_ANDROID_RELA) {
+        return Err("this binary uses Android packed relocations, which repack can't update to grow a file".into());
+    }
+    let mut sh = Sections::read(data)?;
+    let corrupt = || "the binary's program headers are inconsistent".to_string();
 
-    // Our own segment from an earlier repack: the highest one, ending at the end of the
-    // file, with no zero-filled tail. Extend it.
-    let ours = loads.iter().copied().find(|&i| {
-        let p = ph[i];
-        p.vaddr + p.memsz == top && p.offset + p.filesz == file_end && p.filesz == p.memsz
-    });
-    let (seg, start) = match ours {
-        Some(i) => (i, file_end),
+    let seg = match sh.find(SECTION) {
+        // An earlier repack's segment: drop the section tables written after it, then
+        // keep appending to it.
+        Some(s) => {
+            let start = u64_at(&sh.entries[s], 24);
+            let i = ph.iter().position(|p| p.kind == PT_LOAD && p.offset == start).ok_or_else(corrupt)?;
+            data.truncate(ph[i].offset.checked_add(ph[i].filesz).ok_or_else(corrupt)? as usize);
+            i
+        }
         None => {
+            let loads = ph.iter().filter(|p| p.kind == PT_LOAD);
+            let top = loads.clone().map(|p| p.vaddr.checked_add(p.memsz)).collect::<Option<Vec<_>>>().ok_or_else(corrupt)?
+                .into_iter().max().ok_or("no loadable segments")?;
+            let align = loads.map(|p| p.align).max().unwrap_or(0).max(0x1000);
+            if !align.is_power_of_two() || align > MAX_ALIGN { return Err(corrupt()); }
             let props: Vec<(u64, u64)> = ph.iter().filter(|p| p.kind == PT_GNU_PROPERTY).map(|p| (p.offset, p.filesz)).collect();
             let note = (0..ph.len()).rev().find(|&i| ph[i].kind == PT_NOTE && !props.contains(&(ph[i].offset, ph[i].filesz)))
                 .ok_or("the binary has no spare program header (PT_NOTE) to map new data with")?;
-            let start = round_up(file_end, align);
+            let (start, vaddr) = (round_up(data.len() as u64, align).ok_or_else(corrupt)?, round_up(top, align).ok_or_else(corrupt)?);
             ph.remove(note);
-            let p = Phdr { kind: PT_LOAD, flags: 4, offset: start, vaddr: round_up(top, align), filesz: 0, memsz: 0, align };
             let at = ph.iter().rposition(|q| q.kind == PT_LOAD).map_or(ph.len(), |i| i + 1);
-            ph.insert(at, p);
-            (at, start)
+            ph.insert(at, Phdr { kind: PT_LOAD, flags: 4, offset: start, vaddr, paddr: vaddr, filesz: 0, memsz: 0, align });
+            data.resize(start as usize, 0);
+            // A PROGBITS, SHF_ALLOC section over the segment, named in a grown name table.
+            let mut e = [0u8; 64];
+            e[0..4].copy_from_slice(&(sh.names.len() as u32).to_le_bytes());
+            e[4..8].copy_from_slice(&1u32.to_le_bytes());
+            put_u64(&mut e, 8, 2);
+            put_u64(&mut e, 16, vaddr);
+            put_u64(&mut e, 24, start);
+            put_u64(&mut e, 48, 8);
+            sh.names.extend_from_slice(SECTION);
+            sh.names.push(0);
+            sh.entries.push(e);
+            at
         }
     };
-    data.resize(start as usize, 0);
     let mut vaddrs = Vec::new();
     for b in blobs {
-        data.resize(round_up(data.len() as u64, 8) as usize, 0);
+        data.resize(data.len().next_multiple_of(8), 0);
         vaddrs.push(ph[seg].vaddr + (data.len() as u64 - ph[seg].offset));
         data.extend_from_slice(b);
     }
     let size = data.len() as u64 - ph[seg].offset;
     ph[seg].filesz = size;
     ph[seg].memsz = size;
+    let s = sh.find(SECTION).expect("added above");
+    put_u64(&mut sh.entries[s], 32, size);
     write_phdrs(data, off, &ph);
+    sh.append_to(data);
     Ok(vaddrs)
 }
 
@@ -106,22 +182,17 @@ pub fn append(data: &mut Vec<u8>, blobs: &[Vec<u8>]) -> Result<Vec<u64>, String>
 // non-PIE binaries, which read the address from it.
 pub fn point(data: &mut [u8], slot: usize, vaddr: u64, len: usize) -> Result<(), String> {
     let (_, ph) = phdrs(data)?;
+    let relative = relative_type(data).ok_or("unsupported architecture")?;
     let ptr = slot + 16;
     let ptr_va = file_to_vaddr(&ph, ptr as u64).ok_or("table entry is not in a loaded segment")?;
-    if let Some(dynp) = ph.iter().find(|p| p.kind == PT_DYNAMIC) {
-        let (mut rela, mut relasz) = (None, 0);
-        let mut o = dynp.offset as usize;
-        while o + 16 <= (dynp.offset + dynp.filesz) as usize {
-            match u64_at(data, o) { 0 => break, DT_RELA => rela = Some(u64_at(data, o + 8)), DT_RELASZ => relasz = u64_at(data, o + 8), _ => {} }
-            o += 16;
-        }
-        if let Some(start) = rela.and_then(|va| vaddr_to_file(&ph, va)) {
-            let end = (start + relasz as usize).min(data.len());
-            for e in (start..end).step_by(24).filter(|&e| e + 24 <= end) {
-                if u64_at(data, e) != ptr_va { continue; }
-                if !RELATIVE.contains(&(u64_at(data, e + 8) as u32)) { return Err("the table entry's pointer has an unexpected relocation type".into()); }
-                put_u64(data, e + 16, vaddr);
-            }
+    let tags = dynamic(data, &ph);
+    let tag = |t| tags.iter().find(|&&(k, _)| k == t).map(|&(_, v)| v);
+    if let (Some(start), Some(size)) = (tag(DT_RELA).and_then(|va| vaddr_to_file(&ph, va)), tag(DT_RELASZ)) {
+        let end = start.saturating_add(size as usize).min(data.len());
+        for e in (start..end).step_by(24).filter(|&e| e + 24 <= end) {
+            if u64_at(data, e) != ptr_va { continue; }
+            if u64_at(data, e + 8) as u32 != relative { return Err("the table entry's pointer has an unexpected relocation type".into()); }
+            put_u64(data, e + 16, vaddr);
         }
     }
     put_u64(data, ptr, vaddr);
