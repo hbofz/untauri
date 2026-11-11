@@ -154,9 +154,9 @@ file comes out as you left it and every other file is unchanged. It refuses a
 directory extracted from a different build of the app, so edits made against one
 version never land in another.
 
-- In 64-bit Linux, Android and Windows binaries a file can grow as much as it needs.
-  macOS support is next; until then a file there has to fit in the space its
-  original took. Large files usually have a few KB to spare, tiny ones almost none,
+- In 64-bit Linux, Android, Windows and macOS binaries a file can grow as much as it
+  needs. Universal (multi-architecture) macOS binaries are next; until then a file
+  there has to fit in the space its original took. Large files usually have a few KB to spare, tiny ones almost none,
   and in uncompressed builds a file can't grow at all.
 - Linux and Android: growing turns the binary's `PT_NOTE` program header (build
   metadata the loader doesn't use) into the new segment; the note data itself stays
@@ -168,6 +168,11 @@ version never land in another.
   file has one) is recomputed. An executable with other data appended after its last
   section (some installers do this), or with no room left for another section
   header, is refused.
+- macOS: the grown files go in a new `__UNTAURI` segment just before `__LINKEDIT`,
+  which moves up to make room (codesign needs it last). Its load command uses the
+  padding the linker leaves after the load commands; a binary without room is
+  refused. Re-signing (below) is required: Apple Silicon won't run the patched
+  binary until it is signed again.
 - The linker stores identical files once (Nuxt's `index.html` and
   `404.html`, for example). Repack names them when it finds them; make the same edit
   to all of them, or to none.
