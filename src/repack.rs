@@ -3,8 +3,8 @@
 // An asset that still fits is patched in place (see `table::patch`): the new bytes,
 // brotli-compressed when the app was built that way, go over the old ones and the
 // entry's length shrinks to match, so nothing else in the binary changes. One that no
-// longer fits moves to new space at the end of the binary (see `grow`): ELF and PE so
-// far; in a Mach-O it must still fit.
+// longer fits moves to new space at the end of the binary (see `grow`): ELF, PE and
+// single-architecture Mach-O so far.
 
 use crate::output::{content_hash, Entry};
 use crate::scan::Asset;
@@ -130,7 +130,7 @@ pub fn run(path: &Path, dir: &Path, out: Option<&Path>) -> ExitCode {
         say!("error: {} problem(s), nothing written:", errors.len());
         for m in &errors { say!("{m}"); }
         if errors.iter().any(|m| m.contains("over its")) {
-            say!("Each file has to fit in the space its original took. Trim the edit (minify it, drop comments) and repack again. (Growing files is supported for Linux, Android and Windows binaries so far.)");
+            say!("Each file has to fit in the space its original took. Trim the edit (minify it, drop comments) and repack again. (Growing files is supported for Linux, Android, Windows and single-architecture macOS binaries so far.)");
         }
         return ExitCode::from(1);
     }

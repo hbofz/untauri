@@ -82,7 +82,7 @@ enum Cmd {
     ///
     /// Extract with untauri, edit files in the output directory, then repack. A file that
     /// still fits is patched in place. One that has grown moves to a new segment at the
-    /// end of the binary (Linux, Android and Windows binaries; on macOS it must still fit).
+    /// end of the binary (not yet in universal macOS binaries, where it must still fit).
     Repack {
         /// Path to the original .app bundle or raw executable
         path: PathBuf,
