@@ -130,7 +130,7 @@ pub fn run(path: &Path, dir: &Path, out: Option<&Path>) -> ExitCode {
         say!("error: {} problem(s), nothing written:", errors.len());
         for m in &errors { say!("{m}"); }
         if errors.iter().any(|m| m.contains("over its")) {
-            say!("Each file has to fit in the space its original took. Trim the edit (minify it, drop comments) and repack again. (Growing files is supported for Linux and Android binaries so far.)");
+            say!("Each file has to fit in the space its original took. Trim the edit (minify it, drop comments) and repack again. (Growing files is supported for Linux, Android and Windows binaries so far.)");
         }
         return ExitCode::from(1);
     }
@@ -149,6 +149,7 @@ pub fn run(path: &Path, dir: &Path, out: Option<&Path>) -> ExitCode {
         });
         if let Err(e) = res { say!("error: {e}. Nothing written."); return ExitCode::from(1); }
     }
+    grow::finish(&mut data);
     // Growing made the file longer, so re-measure it before the read-back.
     let slices = if grown.is_empty() { slices } else { target::slices(&data) };
     let listing = |k: &str| say!("  {k}{}", if moved.iter().any(|m| m == k) { " (grown: moved to new space at the end of the binary)" } else { "" });

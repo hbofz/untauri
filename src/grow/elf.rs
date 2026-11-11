@@ -1,6 +1,3 @@
-// Room for files that outgrow their original span: append them in a new loadable segment
-// at the end of the binary and point their table entries there.
-//
 // ELF (Linux, Android): the program header table has no spare entry, so the PT_NOTE entry
 // becomes the new PT_LOAD. Notes are build metadata (build id, ABI tag) that the loader
 // does not need; the note sections themselves stay in the file. The entry moves to just
@@ -14,7 +11,6 @@
 // same address, so every pointer into it stays valid, then appends after the copy. It
 // never cuts anything off: after the first repack, tools like objcopy, `strip -g` or a
 // debuglink step move symbol and debug sections after ours, and they must survive.
-// ponytail: ELF only so far; PE and Mach-O each need their own segment surgery.
 
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
@@ -119,7 +115,6 @@ impl Sections {
 
 // Append `blobs` to the binary, mapped read-only. Returns each blob's virtual address.
 pub fn append(data: &mut Vec<u8>, blobs: &[Vec<u8>]) -> Result<Vec<u64>, String> {
-    if !supported(data) { return Err("growing a file past its original size is supported for 64-bit ELF (Linux, Android) so far".into()); }
     let (off, mut ph) = phdrs(data)?;
     if dynamic(data, &ph).iter().any(|&(t, _)| t == DT_ANDROID_REL || t == DT_ANDROID_RELA) {
         return Err("this binary uses Android packed relocations, which repack can't update to grow a file".into());
