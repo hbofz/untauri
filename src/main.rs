@@ -103,9 +103,14 @@ enum Cmd {
 fn wants_color(tty: bool) -> bool {
     let env = |k| std::env::var_os(k).filter(|v| !v.is_empty());
     if env("NO_COLOR").is_some() { return false; }
-    if env("CLICOLOR_FORCE").is_some_and(|v| v != "0") { return true; }
+    if env("CLICOLOR_FORCE").is_some_and(|v| v != "0") {
+        let _ = anstyle_query::windows::enable_ansi_colors();
+        return true;
+    }
+    // A pipe-backed terminal like mintty (Git Bash) has no console to switch, but its
+    // TERM says it draws escape codes itself.
     tty && anstyle_query::clicolor() != Some(false) && anstyle_query::term_supports_color()
-        && anstyle_query::windows::enable_ansi_colors().unwrap_or(true)
+        && (anstyle_query::windows::enable_ansi_colors().unwrap_or(true) || anstyle_query::term_supports_ansi_color())
 }
 
 // For stderr status lines.
