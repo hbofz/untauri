@@ -164,9 +164,10 @@ version never land in another.
   afterwards keeps it. A binary without section headers, or with Android's packed
   relocations, can't be grown; repack says so and writes nothing.
 - Windows: the grown files go in a new `.untauri` section. A signature at the end of
-  the file is removed, since patching breaks it anyway, and the PE checksum is
-  recomputed. An executable with other data appended after its last section (some
-  installers do this) is refused.
+  the file is removed, since patching breaks it anyway, and the PE checksum (when the
+  file has one) is recomputed. An executable with other data appended after its last
+  section (some installers do this), or with no room left for another section
+  header, is refused.
 - The linker stores identical files once (Nuxt's `index.html` and
   `404.html`, for example). Repack names them when it finds them; make the same edit
   to all of them, or to none.

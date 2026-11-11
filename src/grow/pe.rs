@@ -76,6 +76,9 @@ pub fn append(d: &mut Vec<u8>, blobs: &[Vec<u8>]) -> Result<Vec<u64>, String> {
     let (cert_at, cert_len) = (u32_at(d, dir) as usize, u32_at(d, dir + 4) as usize);
     if cert_len > 0 {
         let end = cert_at.checked_add(cert_len).ok_or_else(bad)?;
+        // It must come after every section's data, or cutting it off would cut into them.
+        let sections_end = sections(d, &p).iter().map(|s| s.raw_ptr + s.raw_size).max().unwrap_or(0);
+        if (cert_at as u64) < sections_end.max(p.headers as u64) { return Err(bad()); }
         // The table is padded to 8 bytes; anything else after it is unknown data.
         if cert_at > d.len() || end > d.len() || d.len() - end >= 8 { return Err("the signature is not at the end of the file, so repack can't make room for new data".into()); }
         d.truncate(cert_at);
@@ -99,7 +102,10 @@ pub fn append(d: &mut Vec<u8>, blobs: &[Vec<u8>]) -> Result<Vec<u64>, String> {
             if entry + 40 > p.headers.min(first_raw) || d[entry..entry + 40].iter().any(|&b| b != 0) {
                 return Err("the executable has no room for another section header".into());
             }
-            let va = round_up(secs.iter().map(|s| s.va + s.vsize.max(s.raw_size)).max().ok_or_else(bad)?, p.sect_align);
+            // Right after the highest section, the way the loader lays them out: its virtual
+            // size, or its raw size when the virtual size is 0. A gap is rejected.
+            let top = secs.iter().max_by_key(|s| s.va).ok_or_else(bad)?;
+            let va = round_up(top.va + if top.vsize == 0 { top.raw_size } else { top.vsize }, p.sect_align);
             let raw_ptr = round_up(d.len() as u64, p.file_align);
             if va > u32::MAX as u64 || raw_ptr > u32::MAX as u64 { return Err(bad()); }
             d.resize(raw_ptr as usize, 0);

@@ -3,8 +3,8 @@
 // An asset that still fits is patched in place (see `table::patch`): the new bytes,
 // brotli-compressed when the app was built that way, go over the old ones and the
 // entry's length shrinks to match, so nothing else in the binary changes. One that no
-// longer fits moves to a new segment at the end of the binary (see `grow`), which only
-// ELF supports so far; elsewhere it must still fit.
+// longer fits moves to new space at the end of the binary (see `grow`): ELF and PE so
+// far; in a Mach-O it must still fit.
 
 use crate::output::{content_hash, Entry};
 use crate::scan::Asset;
@@ -181,7 +181,7 @@ pub fn run(path: &Path, dir: &Path, out: Option<&Path>) -> ExitCode {
         Ok(object::FileKind::MachO64 | object::FileKind::MachOFat32 | object::FileKind::MachOFat64) => say!(
             "note: the code signature no longer matches. Put the binary back in its .app and re-sign:\n  codesign --force --deep --preserve-metadata=entitlements -s - <App>.app"),
         Ok(object::FileKind::Pe64 | object::FileKind::Pe32) => say!(
-            "note: if the app was code-signed, that signature no longer matches; Windows may warn before running it."),
+            "note: a code signature no longer applies (growing a file removes it); Windows may warn before running the app."),
         _ => {}
     }
     ExitCode::SUCCESS
