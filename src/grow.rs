@@ -136,12 +136,13 @@ pub fn append(data: &mut Vec<u8>, blobs: &[Vec<u8>]) -> Result<Vec<u64>, String>
             let changed = || "the binary was changed after the last repack in a way repack can't follow; repack the original binary instead".to_string();
             let i = ph.iter().position(|p| p.kind == PT_LOAD && p.vaddr == addr && p.offset == start && p.filesz == size && p.memsz == size)
                 .ok_or_else(changed)?;
-            // Growing it in memory must not run into another segment mapped above it.
-            let end = addr.checked_add(size).ok_or_else(corrupt)?;
-            if ph.iter().any(|p| p.kind == PT_LOAD && p.vaddr >= end) { return Err(changed()); }
+            // Growing it in memory must not run into any other segment.
+            addr.checked_add(size).ok_or_else(corrupt)?;
+            if ph.iter().enumerate().any(|(j, p)| j != i && p.kind == PT_LOAD && p.vaddr.saturating_add(p.memsz) > addr) { return Err(changed()); }
             let old = data.get(start as usize..(start as usize).checked_add(size as usize).ok_or_else(corrupt)?)
                 .ok_or_else(changed)?.to_vec();
-            let align = ph[i].align.max(1);
+            // The page size, as on the first repack: our own p_align could have been edited.
+            let align = ph.iter().filter(|p| p.kind == PT_LOAD).map(|p| p.align).max().unwrap_or(0).max(0x1000);
             if !align.is_power_of_two() || align > MAX_ALIGN { return Err(corrupt()); }
             let at = round_up(data.len() as u64, align).ok_or_else(corrupt)? + addr % align;
             data.resize(at as usize, 0);
