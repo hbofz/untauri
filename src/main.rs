@@ -96,11 +96,21 @@ enum Cmd {
     },
 }
 
-// Color for a terminal, never with NO_COLOR (no-color.org), and also through a pipe
-// with CLICOLOR_FORCE (bixense.com/clicolors), so `untauri list app | less -R` keeps it.
+// Color for a terminal, never with NO_COLOR (no-color.org), and also through a pipe with
+// CLICOLOR_FORCE (bixense.com/clicolors), so `untauri list app | less -R` keeps it.
+// CLICOLOR=0 and TERM=dumb opt a terminal out. The old Windows console shows escape codes
+// as text until virtual terminal processing is switched on; where it can't be, no color.
 fn wants_color(tty: bool) -> bool {
     let env = |k| std::env::var_os(k).filter(|v| !v.is_empty());
-    env("NO_COLOR").is_none() && (tty || env("CLICOLOR_FORCE").is_some_and(|v| v != "0"))
+    if env("NO_COLOR").is_some() { return false; }
+    if env("CLICOLOR_FORCE").is_some_and(|v| v != "0") {
+        let _ = anstyle_query::windows::enable_ansi_colors();
+        return true;
+    }
+    // A pipe-backed terminal like mintty (Git Bash) has no console to switch, but its
+    // TERM says it draws escape codes itself.
+    tty && anstyle_query::clicolor() != Some(false) && anstyle_query::term_supports_color()
+        && (anstyle_query::windows::enable_ansi_colors().unwrap_or(true) || anstyle_query::term_supports_ansi_color())
 }
 
 // For stderr status lines.
@@ -122,13 +132,19 @@ pub fn style(s: &str, code: &str, on: bool) -> String {
 }
 
 // A known leading label gets a bold color. Outcomes (success, warning, error) carry the
-// color through the whole message; a note only marks its label.
+// color through the whole message; a note or a `sources:` summary only marks its label.
+// Messages quote names read out of the binary, so control characters are dropped first:
+// a crafted asset name must not be able to send escape sequences to the terminal.
 fn paint(line: &str, color: bool) -> String {
     const LABELS: [(&str, &str, bool); 8] = [
         ("error", "31", true), ("warning", "33", true), ("note", "36", false),
-        ("complete", "32", true), ("references", "32", true), ("sources", "32", true), ("patched", "32", true), ("dry run", "32", true),
+        ("complete", "32", true), ("references", "32", true), ("sources", "32", false), ("patched", "32", true), ("dry run", "32", true),
     ];
-    match LABELS.iter().find(|(l, ..)| color && line.starts_with(l)) {
+    let line: String = line.chars().filter(|&c| !c.is_control() || c == '\n' || c == '\t').collect();
+    let line = line.as_str();
+    // Only a whole word: `errors found` or `noted` is not a label.
+    let labelled = |l: &str| line.starts_with(l) && matches!(line[l.len()..].chars().next(), Some(':' | ' '));
+    match LABELS.iter().find(|(l, ..)| color && labelled(l)) {
         Some((l, c, true)) => format!("\x1b[1;{c}m{l}\x1b[0;{c}m{}\x1b[0m", &line[l.len()..]),
         Some((l, c, false)) => format!("\x1b[1;{c}m{l}\x1b[0m{}", &line[l.len()..]),
         None => line.to_string(),
@@ -348,6 +364,8 @@ mod tests {
         assert_eq!(paint("note: x", true), "\x1b[1;36mnote\x1b[0m: x");
         assert_eq!(paint("error: nope", false), "error: nope");
         assert_eq!(paint("recovered 61 assets", true), "recovered 61 assets");
+        assert_eq!(paint("notes: x", true), "notes: x", "a label must be a whole word");
+        assert_eq!(paint("  missing: a\x1b[2Jb.css", false), "  missing: a[2Jb.css", "control characters are dropped");
     }
 
     // Kebab-case names with no content hash must NOT alias by their last word. Mutation

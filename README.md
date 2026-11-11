@@ -31,6 +31,9 @@ cargo install untauri
 | `untauri inspect <app>` | Report the Tauri version, crates, plugins and IPC calls |
 | `untauri repack <app> out -o patched` | Write edited files back into the app |
 
+Output is colored in a terminal. `NO_COLOR=1` turns that off, and `CLICOLOR_FORCE=1`
+keeps it when you pipe (the demo above sets it so `| head` stays colored).
+
 `<app>` is a macOS `.app` bundle or an executable: ELF, PE (`.exe`), Mach-O, or an
 Android `.so`. Installers and packages need unpacking first. None of these commands
 run the app:
