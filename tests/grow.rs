@@ -4,7 +4,7 @@
 // operating system's own loader accepting it, and the program printing the new bytes,
 // shows the new segment and the repointed table entry are right.
 //
-// On formats growth does not support yet, repack must refuse cleanly and write nothing.
+// On formats growth does not support yet (macOS), repack must refuse cleanly and write nothing.
 //
 // Mutation check: skip the relocation addend update in grow::point and the patched
 // binary prints the old app.js (or crashes); skip the program header rewrite and it
@@ -37,7 +37,7 @@ fn grown_file_is_served_by_the_patched_binary() {
 
     let r = untauri(&["repack".as_ref(), app.as_os_str(), out.as_os_str(), "-o".as_ref(), patched.as_os_str()]);
     let stderr = String::from_utf8_lossy(&r.stderr);
-    if cfg!(any(target_os = "linux", target_os = "android")) {
+    if cfg!(any(target_os = "linux", target_os = "android", windows)) {
         assert!(r.status.success(), "repack failed: {stderr}");
         assert!(stderr.contains("grown"), "app.js should have been moved, not patched in place: {stderr}");
         let run = Command::new(&patched).output().unwrap();
@@ -65,8 +65,10 @@ fn grown_file_is_served_by_the_patched_binary() {
 
         // objcopy rewrites the file and moves symbol and debug sections after ours. A repack
         // after that must leave them intact (it once cut off everything after its segment).
+        // ELF only: these are the Linux packaging tools.
+        let elf = cfg!(any(target_os = "linux", target_os = "android"));
         let (copied, out3, patched3) = (exe("copied"), dir.join("out3"), exe("patched3"));
-        if Command::new("objcopy").arg(&patched2).arg(&copied).status().is_ok_and(|s| s.success()) {
+        if elf && Command::new("objcopy").arg(&patched2).arg(&copied).status().is_ok_and(|s| s.success()) {
             let syms = |bin: &Path| Command::new("readelf").args(["-sW"]).arg(bin).output().map(|o| (o.stdout, o.stderr)).unwrap();
             let x = untauri(&[copied.as_os_str(), "-o".as_ref(), out3.as_os_str(), "--tree".as_ref()]);
             assert!(x.status.success());
@@ -82,12 +84,12 @@ fn grown_file_is_served_by_the_patched_binary() {
         // Packaging tools strip binaries. The grown data has a section of its own, so it
         // survives: without one, strip drops the segment and the app crashes.
         let stripped = exe("stripped");
-        if Command::new("strip").arg("-o").arg(&stripped).arg(&patched2).status().is_ok_and(|s| s.success()) {
+        if elf && Command::new("strip").arg("-o").arg(&stripped).arg(&patched2).status().is_ok_and(|s| s.success()) {
             check(&stripped);
         }
     } else {
         assert!(!r.status.success(), "growth is not supported on this format yet, so repack must refuse");
-        assert!(stderr.contains("Linux and Android"), "unexpected message: {stderr}");
+        assert!(stderr.contains("so far"), "unexpected message: {stderr}");
         assert!(!patched.exists(), "nothing may be written when repack refuses");
     }
     let _ = std::fs::remove_dir_all(&dir);

@@ -154,15 +154,20 @@ file comes out as you left it and every other file is unchanged. It refuses a
 directory extracted from a different build of the app, so edits made against one
 version never land in another.
 
-- In 64-bit Linux and Android binaries a file can grow as much as it needs. Windows
-  and macOS support is next; until then a file there has to fit in the space its
+- In 64-bit Linux, Android and Windows binaries a file can grow as much as it needs.
+  macOS support is next; until then a file there has to fit in the space its
   original took. Large files usually have a few KB to spare, tiny ones almost none,
   and in uncompressed builds a file can't grow at all.
-- Growing a file turns the binary's `PT_NOTE` program header (build metadata the
-  loader doesn't use) into the new segment; the note data itself stays in the file.
-  The segment gets its own `.untauri` section, so stripping the binary afterwards
-  keeps it. A binary without section headers, or with Android's packed relocations,
-  can't be grown; repack says so and writes nothing.
+- Linux and Android: growing turns the binary's `PT_NOTE` program header (build
+  metadata the loader doesn't use) into the new segment; the note data itself stays
+  in the file. The segment gets its own `.untauri` section, so stripping the binary
+  afterwards keeps it. A binary without section headers, or with Android's packed
+  relocations, can't be grown; repack says so and writes nothing.
+- Windows: the grown files go in a new `.untauri` section. A signature at the end of
+  the file is removed, since patching breaks it anyway, and the PE checksum (when the
+  file has one) is recomputed. An executable with other data appended after its last
+  section (some installers do this), or with no room left for another section
+  header, is refused.
 - The linker stores identical files once (Nuxt's `index.html` and
   `404.html`, for example). Repack names them when it finds them; make the same edit
   to all of them, or to none.
